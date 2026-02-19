@@ -54,12 +54,24 @@ jobs:
                       ver_latest = ver
                       files = {}
 
-                  targets = ["header", "modules", "boot", "amlogic"]
+                  targets = {
+                  "header": "header-",
+                  "modules": "modules-",
+                  "boot": "boot-",
+                  "dtb-amlogic": "dtb-amlogic-"
+                   }
 
                   if ver == ver_latest and "6.18." in name:
-                       for t in targets:
-                           if t in name:
-                               files[t] = msg
+                      print("SCAN:", name)
+                      for key, prefix in targets.items():
+                          if name.startswith(prefix):
+                              print(f"  MATCH {key}")
+                              files[key] = msg
+
+                  print("---- Kernel files detected ----")
+                  for k, v in files.items():
+                      print(k, "=>", v.file.name)
+                  print("Total:", len(files))
               if len(files) != 4:
                   print("Kernel incomplete")
                   return
