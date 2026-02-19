@@ -1,7 +1,9 @@
-name: Kernel test
+name: Kernel stable
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"   # 每6小时检查
 
 jobs:
   kernel:
@@ -14,17 +16,16 @@ jobs:
         run: pip install telethon
 
       - name: Restore session
-        run: |
-          echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
+        run: echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
 
-      - name: Download kernels (6.12 & 6.18)
+      - name: Download latest kernels
         env:
           API_ID: ${{ secrets.TG_API_ID }}
           API_HASH: ${{ secrets.TG_API_HASH }}
           CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
         run: |
           python << 'PY'
-          import re, os, hashlib, datetime
+          import re, os, hashlib, datetime, sys
           from telethon import TelegramClient
 
           api_id = int(os.environ["API_ID"])
@@ -42,12 +43,21 @@ jobs:
                       h.update(chunk)
               return h.hexdigest()
 
-          async def collect():
-              await client.start()
+          def load_last():
+              if not os.path.exists(".last_kernel"):
+                  return {}
+              data = {}
+              for line in open(".last_kernel"):
+                  k,v = line.strip().split("=")
+                  data[k]=v
+              return data
 
-              # {ver: {type: msg}}
-              kernels = {}
+          def save_last(d):
+              with open(".last_kernel","w") as f:
+                  for k,v in d.items():
+                      f.write(f"{k}={v}\n")
 
+          async def find_latest(prefix):
               targets = {
                   "header": "header-",
                   "modules": "modules-",
@@ -55,12 +65,15 @@ jobs:
                   "dtb-amlogic": "dtb-amlogic-",
               }
 
-              async for msg in client.iter_messages(chat_id, limit=500):
+              files = {}
+              ver_found = None
+
+              async for msg in client.iter_messages(chat_id):
                   if not msg.file:
                       continue
 
                   name = msg.file.name or ""
-                  if not any(p in name for p in TARGET_PREFIX):
+                  if prefix not in name:
                       continue
 
                   m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
@@ -69,42 +82,50 @@ jobs:
 
                   ver = m.group(1)
 
-                  if ver not in kernels:
-                      kernels[ver] = {}
+                  if ver_found is None:
+                      ver_found = ver
 
-                  print("SCAN:", name)
+                  if ver != ver_found:
+                      break
 
-                  for key, prefix in targets.items():
-                      if name.startswith(prefix):
-                          print(f"  MATCH {ver} -> {key}")
-                          kernels[ver][key] = msg
+                  for k,p in targets.items():
+                      if name.startswith(p):
+                          files[k] = msg
 
-              # keep only complete
-              kernels = {v: files for v, files in kernels.items() if len(files) == 4}
+                  if len(files)==4:
+                      return ver_found, files
 
-              if not kernels:
-                  print("No complete kernels found")
-                  return
+              return None, None
 
-              # pick latest per branch
-              selected = {}
-              for pref in TARGET_PREFIX:
-                  vers = [v for v in kernels if v.startswith(pref)]
-                  if vers:
-                      selected[pref] = sorted(vers)[-1]
+          async def main():
+              await client.start()
 
-              print("Selected:", selected)
+              last = load_last()
+              new_last = dict(last)
 
-              changelog = []
               os.makedirs("dist", exist_ok=True)
+              changelog = []
+              updated = False
 
-              for pref, ver in selected.items():
-                  files = kernels[ver]
+              for pref in TARGET_PREFIX:
+                  ver, files = await find_latest(pref)
+                  if not ver:
+                      continue
+
+                  print("Latest", pref, ver)
+
+                  if last.get(pref) == ver:
+                      print("No change:", pref)
+                      continue
+
+                  print("NEW:", pref, ver)
+                  updated = True
+                  new_last[pref] = ver
+
                   base_dir = f"dl/{ver}"
                   os.makedirs(base_dir, exist_ok=True)
 
-                  print("---- Download", ver)
-                  for k, msg in files.items():
+                  for k,msg in files.items():
                       out = f"{base_dir}/{k}.tar.gz"
                       await msg.download_media(out)
 
@@ -112,20 +133,32 @@ jobs:
                   os.system(f"tar -czf {tar_name} -C dl {ver}")
 
                   sha = sha256sum(tar_name)
-                  print(ver, "SHA256", sha)
-
                   changelog.append(f"## {ver}\n- sha256: `{sha}`\n")
 
-              # write changelog
-              with open("dist/CHANGELOG.md", "w") as f:
+              if not updated:
+                  print("No kernel updates")
+                  sys.exit(0)
+
+              save_last(new_last)
+
+              with open("dist/CHANGELOG.md","w") as f:
                   f.write(f"# Kernel builds {datetime.date.today()}\n\n")
                   f.write("\n".join(changelog))
 
           with client:
-              client.loop.run_until_complete(collect())
+              client.loop.run_until_complete(main())
           PY
 
+      - name: Commit state
+        run: |
+          git config user.name github-actions
+          git config user.email actions@github.com
+          git add .last_kernel || true
+          git commit -m "update kernel state" || true
+          git push || true
+
       - name: Upload release
+        if: hashFiles('dist/*.tar.gz') != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kernel_stable
