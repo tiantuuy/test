@@ -54,10 +54,12 @@ jobs:
                       ver_latest = ver
                       files = {}
 
-                  if ver == ver_latest:
-                      if name.startswith(("header-6.18", "modules-6.18", "boot-6.18", "dtb-amlogic-6.18")):
-                          files[name] = msg
+                  targets = ["header", "modules", "boot", "amlogic"]
 
+                  if ver == ver_latest and "6.18." in name:
+                       for t in targets:
+                           if t in name:
+                               files[t] = msg
               if len(files) != 4:
                   print("Kernel incomplete")
                   return
