@@ -1,12 +1,12 @@
-name: Kernel From Telegram
+name: Kernel From Telegram (Stable)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"   # 每6小时
+    - cron: "0 03 * * 5"
 
 jobs:
-  build:
+  kernel:
     runs-on: ubuntu-latest
 
     env:
@@ -16,61 +16,110 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install jq
+      - name: Install deps
         run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Restore offset
+        id: offset
+        run: |
+          if [ -f tg_offset.txt ]; then
+            OFFSET=$(cat tg_offset.txt)
+          else
+            OFFSET=0
+          fi
+          echo "offset=$OFFSET" >> $GITHUB_OUTPUT
 
       - name: Fetch updates
         run: |
-          curl -s "https://api.telegram.org/bot$TOKEN/getUpdates" > updates.json
+          curl -s "https://api.telegram.org/bot$TOKEN/getUpdates?offset=${{ steps.offset.outputs.offset }}" > updates.json
 
-      - name: Extract kernel file list
+      - name: Save new offset
+        run: |
+          MAX=$(jq '.result[].update_id' updates.json | sort -n | tail -n1)
+          if [ "$MAX" != "" ]; then
+            echo $((MAX+1)) > tg_offset.txt
+          fi
+
+      - name: Extract document filenames
         run: |
           jq -r --arg CHAT "$CHAT_ID" '
             .result[]
             | select(.message.chat.id|tostring==$CHAT)
+            | select(.message.document != null)
             | .message.document.file_name
-          ' updates.json > all_files.txt
+          ' updates.json > files.txt
 
       - name: Detect latest version
         id: ver
         run: |
-          VER=$(grep -oP '[0-9]+\.[0-9]+\.[0-9]+-flippy-[0-9]+\+' all_files.txt | sort -V | tail -n1)
-          echo "Latest version: $VER"
+          VER=$(grep -oP '[0-9]+\.[0-9]+\.[0-9]+-flippy-[0-9]+\+' files.txt | sort -V | tail -n1)
+          echo "Latest: $VER"
           echo "ver=$VER" >> $GITHUB_OUTPUT
 
-      - name: Download 4 kernel files
+      - name: Collect latest 4 files
         run: |
-          mkdir -p dl
           VER=${{ steps.ver.outputs.ver }}
+          mkdir -p dl
 
           jq -c --arg CHAT "$CHAT_ID" --arg VER "$VER" '
             .result[]
             | select(.message.chat.id|tostring==$CHAT)
+            | select(.message.document != null)
             | select(.message.document.file_name | contains($VER))
             | .message.document
           ' updates.json > docs.json
 
-          for row in $(cat docs.json); do
-            FILE_ID=$(echo $row | jq -r '.file_id')
-            FILE_NAME=$(echo $row | jq -r '.file_name')
+          COUNT=0
 
-            if [[ "$FILE_NAME" == header-* || "$FILE_NAME" == modules-* || "$FILE_NAME" == boot-* || "$FILE_NAME" == dtb-amlogic-* ]]; then
-              echo "Downloading $FILE_NAME"
+          while read -r row; do
+            NAME=$(echo "$row" | jq -r '.file_name')
+            ID=$(echo "$row" | jq -r '.file_id')
 
-              curl -s "https://api.telegram.org/bot$TOKEN/getFile?file_id=$FILE_ID" > file.json
-              FILE_PATH=$(jq -r '.result.file_path' file.json)
+            if [[ "$NAME" == header-* || "$NAME" == modules-* || "$NAME" == boot-* || "$NAME" == dtb-amlogic-* ]]; then
+              COUNT=$((COUNT+1))
 
-              curl -L -o "dl/$FILE_NAME" \
-                "https://api.telegram.org/file/bot$TOKEN/$FILE_PATH"
+              curl -s "https://api.telegram.org/bot$TOKEN/getFile?file_id=$ID" > file.json
+              PATHF=$(jq -r '.result.file_path' file.json)
+
+              curl -L -o "dl/$NAME" \
+                "https://api.telegram.org/file/bot$TOKEN/$PATHF"
             fi
-          done
+          done < docs.json
 
-      - name: Pack kernel bundle
+          echo "Found $COUNT kernel parts"
+
+          if [ "$COUNT" -ne 4 ]; then
+            echo "Kernel not complete, exit"
+            exit 0
+          fi
+
+      - name: Pack bundle
         run: |
           VER=${{ steps.ver.outputs.ver }}
           tar -czf "$VER.tar.gz" -C dl .
 
-      - name: Create Release
+      - name: Delete old assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO=${{ github.repository }}
+
+          ID=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/$REPO/releases/tags/kernel_stable \
+            | jq -r '.id')
+
+          if [ "$ID" != "null" ]; then
+            ASSETS=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              https://api.github.com/repos/$REPO/releases/$ID/assets \
+              | jq -r '.[].id')
+
+            for A in $ASSETS; do
+              curl -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+                https://api.github.com/repos/$REPO/releases/assets/$A
+            done
+          fi
+
+      - name: Upload release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kernel_stable
@@ -79,3 +128,11 @@ jobs:
             *.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Commit offset
+        run: |
+          git config user.name actions
+          git config user.email actions@github.com
+          git add tg_offset.txt || true
+          git commit -m "update offset" || true
+          git push
