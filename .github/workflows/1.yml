@@ -1,133 +1,137 @@
 name: Kernel test
 
-on: workflow_dispatch:
+on:
+  workflow_dispatch:
 
-jobs: kernel: runs-on: ubuntu-latest
+jobs:
+  kernel:
+    runs-on: ubuntu-latest
 
-steps:
-  - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
 
-  - name: Install Python deps
-    run: pip install telethon
+      - name: Install Python deps
+        run: pip install telethon
 
-  - name: Restore session
-    run: |
-      echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
+      - name: Restore session
+        run: |
+          echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
 
-  - name: Download kernels (6.12 & 6.18)
-    env:
-      API_ID: ${{ secrets.TG_API_ID }}
-      API_HASH: ${{ secrets.TG_API_HASH }}
-      CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
-    run: |
-      python << 'PY'
-      import re, os, hashlib, datetime
-      from telethon import TelegramClient
+      - name: Download kernels (6.12 & 6.18)
+        env:
+          API_ID: ${{ secrets.TG_API_ID }}
+          API_HASH: ${{ secrets.TG_API_HASH }}
+          CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
+        run: |
+          python << 'PY'
+          import re, os, hashlib, datetime
+          from telethon import TelegramClient
 
-      api_id = int(os.environ["API_ID"])
-      api_hash = os.environ["API_HASH"]
-      chat_id = int(os.environ["CHAT_ID"])
+          api_id = int(os.environ["API_ID"])
+          api_hash = os.environ["API_HASH"]
+          chat_id = int(os.environ["CHAT_ID"])
 
-      TARGET_PREFIX = ("6.12.", "6.18.")
+          TARGET_PREFIX = ("6.12.", "6.18.")
 
-      client = TelegramClient("tg", api_id, api_hash)
+          client = TelegramClient("tg", api_id, api_hash)
 
-      def sha256sum(path):
-          h = hashlib.sha256()
-          with open(path, "rb") as f:
-              for chunk in iter(lambda: f.read(1024*1024), b""):
-                  h.update(chunk)
-          return h.hexdigest()
+          def sha256sum(path):
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1024*1024), b""):
+                      h.update(chunk)
+              return h.hexdigest()
 
-      async def collect():
-          await client.start()
+          async def collect():
+              await client.start()
 
-          # {ver: {type: msg}}
-          kernels = {}
+              # {ver: {type: msg}}
+              kernels = {}
 
-          targets = {
-              "header": "header-",
-              "modules": "modules-",
-              "boot": "boot-",
-              "dtb-amlogic": "dtb-amlogic-",
-          }
+              targets = {
+                  "header": "header-",
+                  "modules": "modules-",
+                  "boot": "boot-",
+                  "dtb-amlogic": "dtb-amlogic-",
+              }
 
-          async for msg in client.iter_messages(chat_id, limit=500):
-              if not msg.file:
-                  continue
+              async for msg in client.iter_messages(chat_id, limit=500):
+                  if not msg.file:
+                      continue
 
-              name = msg.file.name or ""
-              if not any(p in name for p in TARGET_PREFIX):
-                  continue
+                  name = msg.file.name or ""
+                  if not any(p in name for p in TARGET_PREFIX):
+                      continue
 
-              m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
-              if not m:
-                  continue
+                  m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
+                  if not m:
+                      continue
 
-              ver = m.group(1)
+                  ver = m.group(1)
 
-              if ver not in kernels:
-                  kernels[ver] = {}
+                  if ver not in kernels:
+                      kernels[ver] = {}
 
-              print("SCAN:", name)
+                  print("SCAN:", name)
 
-              for key, prefix in targets.items():
-                  if name.startswith(prefix):
-                      print(f"  MATCH {ver} -> {key}")
-                      kernels[ver][key] = msg
+                  for key, prefix in targets.items():
+                      if name.startswith(prefix):
+                          print(f"  MATCH {ver} -> {key}")
+                          kernels[ver][key] = msg
 
-          # keep only complete
-          kernels = {v:files for v,files in kernels.items() if len(files)==4}
-          if not kernels:
-              print("No complete kernels found")
-              return
+              # keep only complete
+              kernels = {v: files for v, files in kernels.items() if len(files) == 4}
 
-          # pick latest per branch
-          selected = {}
-          for pref in TARGET_PREFIX:
-              vers = [v for v in kernels if v.startswith(pref)]
-              if vers:
-                  selected[pref] = sorted(vers)[-1]
+              if not kernels:
+                  print("No complete kernels found")
+                  return
 
-          print("Selected:", selected)
+              # pick latest per branch
+              selected = {}
+              for pref in TARGET_PREFIX:
+                  vers = [v for v in kernels if v.startswith(pref)]
+                  if vers:
+                      selected[pref] = sorted(vers)[-1]
 
-          changelog = []
-          os.makedirs("dist", exist_ok=True)
+              print("Selected:", selected)
 
-          for pref, ver in selected.items():
-              files = kernels[ver]
-              base_dir = f"dl/{ver}"
-              os.makedirs(base_dir, exist_ok=True)
+              changelog = []
+              os.makedirs("dist", exist_ok=True)
 
-              print("---- Download", ver)
-              for k, msg in files.items():
-                  out = f"{base_dir}/{k}.tar.gz"
-                  await msg.download_media(out)
+              for pref, ver in selected.items():
+                  files = kernels[ver]
+                  base_dir = f"dl/{ver}"
+                  os.makedirs(base_dir, exist_ok=True)
 
-              tar_name = f"dist/{ver}.tar.gz"
-              os.system(f"tar -czf {tar_name} -C dl {ver}")
+                  print("---- Download", ver)
+                  for k, msg in files.items():
+                      out = f"{base_dir}/{k}.tar.gz"
+                      await msg.download_media(out)
 
-              sha = sha256sum(tar_name)
-              print(ver, "SHA256", sha)
+                  tar_name = f"dist/{ver}.tar.gz"
+                  os.system(f"tar -czf {tar_name} -C dl {ver}")
 
-              changelog.append(f"## {ver}\n- sha256: `{sha}`\n")
+                  sha = sha256sum(tar_name)
+                  print(ver, "SHA256", sha)
 
-          # write changelog
-          with open("dist/CHANGELOG.md", "w") as f:
-              f.write(f"# Kernel builds {datetime.date.today()}\n\n")
-              f.write("\n".join(changelog))
+                  changelog.append(f"## {ver}\n- sha256: `{sha}`\n")
 
-      with client:
-          client.loop.run_until_complete(collect())
-      PY
+              # write changelog
+              with open("dist/CHANGELOG.md", "w") as f:
+                  f.write(f"# Kernel builds {datetime.date.today()}\n\n")
+                  f.write("\n".join(changelog))
 
-  - name: Upload release
-    uses: softprops/action-gh-release@v2
-    with:
-      tag_name: kernel_stable
-      name: Kernel_Stable
-      files: |
-        dist/*.tar.gz
-        dist/CHANGELOG.md
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          with client:
+              client.loop.run_until_complete(collect())
+          PY
+
+      - name: Upload release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel_stable
+          name: Kernel_Stable
+          files: |
+            dist/*.tar.gz
+            dist/CHANGELOG.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
