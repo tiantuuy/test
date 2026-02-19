@@ -62,13 +62,16 @@ jobs:
                   print("Kernel incomplete")
                   return
 
-              os.makedirs("dl", exist_ok=True)
+              base_dir = f"dl/{ver_latest}"
+              os.makedirs(base_dir, exist_ok=True)
 
               for name, msg in files.items():
-                  print("Downloading", name)
-                  await msg.download_media(f"dl/{name}")
+                  path = f"{base_dir}/{name}"
+                  print("Downloading", name, "->", path)
+                  await msg.download_media(path)
 
-              os.system(f"tar -czf {ver_latest}.tar.gz -C dl .")
+              tar_name = f"{ver_latest}.tar.gz"
+              os.system(f"tar -czf {tar_name} -C dl {ver_latest}")
 
           with client:
               client.loop.run_until_complete(main())
