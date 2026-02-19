@@ -1,101 +1,133 @@
 name: Kernel test
 
-on:
-  workflow_dispatch:
-  
-jobs:
-  kernel:
-    runs-on: ubuntu-latest
+on: workflow_dispatch:
 
-    steps:
-      - uses: actions/checkout@v4
+jobs: kernel: runs-on: ubuntu-latest
 
-      - name: Install Python deps
-        run: pip install telethon
+steps:
+  - uses: actions/checkout@v4
 
-      - name: Restore session
-        run: |
-          echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
+  - name: Install Python deps
+    run: pip install telethon
 
-      - name: Download kernel
-        env:
-          API_ID: ${{ secrets.TG_API_ID }}
-          API_HASH: ${{ secrets.TG_API_HASH }}
-          CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
-        run: |
-          python << 'PY'
-          import re, os
-          from telethon import TelegramClient
+  - name: Restore session
+    run: |
+      echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
 
-          api_id = int(os.environ["API_ID"])
-          api_hash = os.environ["API_HASH"]
-          chat_id = int(os.environ["CHAT_ID"])
+  - name: Download kernels (6.12 & 6.18)
+    env:
+      API_ID: ${{ secrets.TG_API_ID }}
+      API_HASH: ${{ secrets.TG_API_HASH }}
+      CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
+    run: |
+      python << 'PY'
+      import re, os, hashlib, datetime
+      from telethon import TelegramClient
 
-          client = TelegramClient("tg", api_id, api_hash)
+      api_id = int(os.environ["API_ID"])
+      api_hash = os.environ["API_HASH"]
+      chat_id = int(os.environ["CHAT_ID"])
 
-          async def main():
-              await client.start()
+      TARGET_PREFIX = ("6.12.", "6.18.")
 
-              files = {}
-              ver_latest = None
+      client = TelegramClient("tg", api_id, api_hash)
 
-              async for msg in client.iter_messages(chat_id, limit=200):
-                  if not msg.file:
-                      continue
+      def sha256sum(path):
+          h = hashlib.sha256()
+          with open(path, "rb") as f:
+              for chunk in iter(lambda: f.read(1024*1024), b""):
+                  h.update(chunk)
+          return h.hexdigest()
 
-                  name = msg.file.name or ""
-                  m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
-                  if not m:
-                      continue
+      async def collect():
+          await client.start()
 
-                  ver = m.group(1)
+          # {ver: {type: msg}}
+          kernels = {}
 
-                  if ver_latest is None or ver > ver_latest:
-                      ver_latest = ver
-                      files = {}
+          targets = {
+              "header": "header-",
+              "modules": "modules-",
+              "boot": "boot-",
+              "dtb-amlogic": "dtb-amlogic-",
+          }
 
-                  targets = {
-                  "header": "header-",
-                  "modules": "modules-",
-                  "boot": "boot-",
-                  "dtb-amlogic": "dtb-amlogic-"
-                   }
+          async for msg in client.iter_messages(chat_id, limit=500):
+              if not msg.file:
+                  continue
 
-                  if ver == ver_latest and "6.18." in name:
-                      print("SCAN:", name)
-                      for key, prefix in targets.items():
-                          if name.startswith(prefix):
-                              print(f"  MATCH {key}")
-                              files[key] = msg
+              name = msg.file.name or ""
+              if not any(p in name for p in TARGET_PREFIX):
+                  continue
 
-                  print("---- Kernel files detected ----")
-                  for k, v in files.items():
-                      print(k, "=>", v.file.name)
-                  print("Total:", len(files))
-              if len(files) != 4:
-                  print("Kernel incomplete")
-                  return
+              m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
+              if not m:
+                  continue
 
-              base_dir = f"dl/{ver_latest}"
+              ver = m.group(1)
+
+              if ver not in kernels:
+                  kernels[ver] = {}
+
+              print("SCAN:", name)
+
+              for key, prefix in targets.items():
+                  if name.startswith(prefix):
+                      print(f"  MATCH {ver} -> {key}")
+                      kernels[ver][key] = msg
+
+          # keep only complete
+          kernels = {v:files for v,files in kernels.items() if len(files)==4}
+          if not kernels:
+              print("No complete kernels found")
+              return
+
+          # pick latest per branch
+          selected = {}
+          for pref in TARGET_PREFIX:
+              vers = [v for v in kernels if v.startswith(pref)]
+              if vers:
+                  selected[pref] = sorted(vers)[-1]
+
+          print("Selected:", selected)
+
+          changelog = []
+          os.makedirs("dist", exist_ok=True)
+
+          for pref, ver in selected.items():
+              files = kernels[ver]
+              base_dir = f"dl/{ver}"
               os.makedirs(base_dir, exist_ok=True)
 
-              for name, msg in files.items():
-                  path = f"{base_dir}/{name}"
-                  print("Downloading", name, "->", path)
-                  await msg.download_media(path)
+              print("---- Download", ver)
+              for k, msg in files.items():
+                  out = f"{base_dir}/{k}.tar.gz"
+                  await msg.download_media(out)
 
-              tar_name = f"{ver_latest}.tar.gz"
-              os.system(f"tar -czf {tar_name} -C dl {ver_latest}")
+              tar_name = f"dist/{ver}.tar.gz"
+              os.system(f"tar -czf {tar_name} -C dl {ver}")
 
-          with client:
-              client.loop.run_until_complete(main())
-          PY
+              sha = sha256sum(tar_name)
+              print(ver, "SHA256", sha)
 
-      - name: Upload release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: kernel_stable
-          name: Kernel_Stable
-          files: "*.tar.gz"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              changelog.append(f"## {ver}\n- sha256: `{sha}`\n")
+
+          # write changelog
+          with open("dist/CHANGELOG.md", "w") as f:
+              f.write(f"# Kernel builds {datetime.date.today()}\n\n")
+              f.write("\n".join(changelog))
+
+      with client:
+          client.loop.run_until_complete(collect())
+      PY
+
+  - name: Upload release
+    uses: softprops/action-gh-release@v2
+    with:
+      tag_name: kernel_stable
+      name: Kernel_Stable
+      files: |
+        dist/*.tar.gz
+        dist/CHANGELOG.md
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
