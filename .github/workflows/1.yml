@@ -3,182 +3,150 @@ name: Kernel stable
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 */6 * * *"   # 每6小时检查一次
 
 jobs:
   kernel:
     runs-on: ubuntu-latest
-    timeout-minutes: 2   # 整个任务最大2分钟
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deps
-        run: pip install --no-cache-dir telethon
+      - name: Install Python deps
+        run: pip install telethon
 
       - name: Restore session
         run: |
           echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
-          ls -l tg.session
 
-      - name: Fetch latest kernels
+      - name: Get latest kernel
+        id: kernel
         env:
           API_ID: ${{ secrets.TG_API_ID }}
           API_HASH: ${{ secrets.TG_API_HASH }}
           CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
         run: |
           python << 'PY'
-          import re, os, hashlib, datetime, sys
+          import re, os, json
           from telethon import TelegramClient
 
           api_id = int(os.environ["API_ID"])
           api_hash = os.environ["API_HASH"]
           chat_id = int(os.environ["CHAT_ID"])
 
-          TARGET_PREFIX = ("6.12.", "6.18.")
+          client = TelegramClient("tg", api_id, api_hash)
 
-          def sha256sum(path):
-              import hashlib
-              h = hashlib.sha256()
-              with open(path,"rb") as f:
-                  for c in iter(lambda:f.read(1024*1024),b""):
-                      h.update(c)
-              return h.hexdigest()
+          async def main():
+              await client.start()
 
-          def load_last():
-              if not os.path.exists(".last_kernel"):
-                  return {}
-              d={}
-              for line in open(".last_kernel"):
-                  k,v=line.strip().split("=")
-                  d[k]=v
-              return d
-
-          def save_last(d):
-              with open(".last_kernel","w") as f:
-                  for k,v in d.items():
-                      f.write(f"{k}={v}\n")
-
-          async def find_latest(client, prefix):
-              targets={
-                  "header":"header-",
-                  "modules":"modules-",
-                  "boot":"boot-",
-                  "dtb-amlogic":"dtb-amlogic-",
+              targets = {
+                  "header": "header-",
+                  "modules": "modules-",
+                  "boot": "boot-",
+                  "dtb-amlogic": "dtb-amlogic-"
               }
 
-              files={}
-              ver_found=None
+              files = {}
+              ver_latest = None
 
-              async for msg in client.iter_messages(chat_id, limit=80):
+              async for msg in client.iter_messages(chat_id, limit=200):
                   if not msg.file:
                       continue
 
-                  name=msg.file.name or ""
-                  if prefix not in name:
-                      continue
+                  name = msg.file.name or ""
 
-                  m=re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)',name)
+                  m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
                   if not m:
                       continue
 
-                  ver=m.group(1)
+                  ver = m.group(1)
 
-                  if ver_found is None:
-                      ver_found=ver
-                      print("Latest",prefix,ver_found)
+                  if "6.18." not in ver:
+                      continue
 
-                  if ver!=ver_found:
+                  if ver_latest is None or ver > ver_latest:
+                      ver_latest = ver
+                      files = {}
+                      print("NEW VERSION:", ver_latest)
+
+                  if ver != ver_latest:
+                      continue
+
+                  for key, prefix in targets.items():
+                      if name.startswith(prefix):
+                          files[key] = msg
+                          print("MATCH", key, name)
+
+                  if len(files) == 4:
                       break
 
-                  for k,p in targets.items():
-                      if name.startswith(p):
-                          files[k]=msg
-
-                  if len(files)==4:
-                      return ver_found,files
-
-              return None,None
-
-          async def main():
-              client=TelegramClient("tg",api_id,api_hash)
-
-              print("Connecting Telegram…")
-              await client.connect()
-
-              if not await client.is_user_authorized():
-                  print("ERROR: Telegram session invalid")
+              if len(files) != 4:
+                  print("Kernel incomplete")
                   return
 
-              print("Telegram OK")
+              # 输出版本给后续 step
+              with open("kernel.json", "w") as f:
+                  json.dump({"version": ver_latest}, f)
 
-              last=load_last()
-              new_last=dict(last)
+              base_dir = f"dl/{ver_latest}"
+              os.makedirs(base_dir, exist_ok=True)
 
-              os.makedirs("dist",exist_ok=True)
-              updated=False
-              changelog=[]
+              for key, msg in files.items():
+                  out = f"{base_dir}/{msg.file.name}"
+                  print("Downloading", msg.file.name)
+                  await msg.download_media(out)
 
-              for pref in TARGET_PREFIX:
-                  ver,files=await find_latest(client,pref)
-                  if not ver:
-                      continue
+              tar_name = f"{ver_latest}.tar.gz"
+              os.system(f"tar -czf {tar_name} -C dl {ver_latest}")
 
-                  if last.get(pref)==ver:
-                      print("No change",pref)
-                      continue
-
-                  print("NEW",pref,ver)
-                  updated=True
-                  new_last[pref]=ver
-
-                  base=f"dl/{ver}"
-                  os.makedirs(base,exist_ok=True)
-
-                  for k,msg in files.items():
-                      out=f"{base}/{k}.tar.gz"
-                      await msg.download_media(out)
-
-                  tar=f"dist/{ver}.tar.gz"
-                  os.system(f"tar -czf {tar} -C dl {ver}")
-
-                  sha=sha256sum(tar)
-                  changelog.append(f"## {ver}\n- sha256: `{sha}`\n")
-
-              await client.disconnect()
-
-              if not updated:
-                  print("No kernel updates")
-                  return
-
-              save_last(new_last)
-
-              with open("dist/CHANGELOG.md","w") as f:
-                  f.write(f"# Kernel builds {datetime.date.today()}\n\n")
-                  f.write("\n".join(changelog))
-
-          import asyncio
-          asyncio.run(main())
+          with client:
+              client.loop.run_until_complete(main())
           PY
 
-      - name: Commit state
+      - name: Read version
+        id: ver
         run: |
-          if [ -f .last_kernel ]; then
-            git config user.name github-actions
-            git config user.email actions@github.com
-            git add .last_kernel
-            git commit -m "update kernel state" || true
-            git push || true
+          if [ -f kernel.json ]; then
+            VER=$(jq -r .version kernel.json)
+            echo "version=$VER" >> $GITHUB_OUTPUT
           fi
 
-      - name: Release
-        if: hashFiles('dist/*.tar.gz') != ''
+      - name: Check previous version
+        id: check
+        run: |
+          PREV=""
+          if [ -f latest.txt ]; then
+            PREV=$(cat latest.txt)
+          fi
+
+          echo "previous=$PREV" >> $GITHUB_OUTPUT
+          echo "current=${{ steps.ver.outputs.version }}" >> $GITHUB_OUTPUT
+
+          if [ "$PREV" = "${{ steps.ver.outputs.version }}" ]; then
+            echo "same=true" >> $GITHUB_OUTPUT
+          else
+            echo "same=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Save new version
+        if: steps.check.outputs.same == 'false'
+        run: echo "${{ steps.ver.outputs.version }}" > latest.txt
+
+      - name: Commit version state
+        if: steps.check.outputs.same == 'false'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add latest.txt
+          git commit -m "update kernel ${{ steps.ver.outputs.version }}"
+          git push
+
+      - name: Upload release
+        if: steps.check.outputs.same == 'false'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kernel_stable
           name: Kernel_Stable
-          files: |
-            dist/*.tar.gz
-            dist/CHANGELOG.md
+          files: "*.tar.gz"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
