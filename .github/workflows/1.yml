@@ -3,22 +3,25 @@ name: Kernel stable
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"   # 每6小时检查
+    - cron: "0 */6 * * *"
 
 jobs:
   kernel:
     runs-on: ubuntu-latest
+    timeout-minutes: 2   # 整个任务最大2分钟
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Python deps
-        run: pip install telethon
+      - name: Install deps
+        run: pip install --no-cache-dir telethon
 
       - name: Restore session
-        run: echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
+        run: |
+          echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
+          ls -l tg.session
 
-      - name: Download latest kernels
+      - name: Fetch latest kernels
         env:
           API_ID: ${{ secrets.TG_API_ID }}
           API_HASH: ${{ secrets.TG_API_HASH }}
@@ -34,110 +37,119 @@ jobs:
 
           TARGET_PREFIX = ("6.12.", "6.18.")
 
-          client = TelegramClient("tg", api_id, api_hash)
-
           def sha256sum(path):
+              import hashlib
               h = hashlib.sha256()
-              with open(path, "rb") as f:
-                  for chunk in iter(lambda: f.read(1024*1024), b""):
-                      h.update(chunk)
+              with open(path,"rb") as f:
+                  for c in iter(lambda:f.read(1024*1024),b""):
+                      h.update(c)
               return h.hexdigest()
 
           def load_last():
               if not os.path.exists(".last_kernel"):
                   return {}
-              data = {}
+              d={}
               for line in open(".last_kernel"):
-                  k,v = line.strip().split("=")
-                  data[k]=v
-              return data
+                  k,v=line.strip().split("=")
+                  d[k]=v
+              return d
 
           def save_last(d):
               with open(".last_kernel","w") as f:
                   for k,v in d.items():
                       f.write(f"{k}={v}\n")
 
-          async def find_latest(prefix):
-              targets = {
-                  "header": "header-",
-                  "modules": "modules-",
-                  "boot": "boot-",
-                  "dtb-amlogic": "dtb-amlogic-",
+          async def find_latest(client, prefix):
+              targets={
+                  "header":"header-",
+                  "modules":"modules-",
+                  "boot":"boot-",
+                  "dtb-amlogic":"dtb-amlogic-",
               }
 
-              files = {}
-              ver_found = None
+              files={}
+              ver_found=None
 
-              async for msg in client.iter_messages(chat_id):
+              async for msg in client.iter_messages(chat_id, limit=80):
                   if not msg.file:
                       continue
 
-                  name = msg.file.name or ""
+                  name=msg.file.name or ""
                   if prefix not in name:
                       continue
 
-                  m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
+                  m=re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)',name)
                   if not m:
                       continue
 
-                  ver = m.group(1)
+                  ver=m.group(1)
 
                   if ver_found is None:
-                      ver_found = ver
+                      ver_found=ver
+                      print("Latest",prefix,ver_found)
 
-                  if ver != ver_found:
+                  if ver!=ver_found:
                       break
 
                   for k,p in targets.items():
                       if name.startswith(p):
-                          files[k] = msg
+                          files[k]=msg
 
                   if len(files)==4:
-                      return ver_found, files
+                      return ver_found,files
 
-              return None, None
+              return None,None
 
           async def main():
-              await client.start()
+              client=TelegramClient("tg",api_id,api_hash)
 
-              last = load_last()
-              new_last = dict(last)
+              print("Connecting Telegram…")
+              await client.connect()
 
-              os.makedirs("dist", exist_ok=True)
-              changelog = []
-              updated = False
+              if not await client.is_user_authorized():
+                  print("ERROR: Telegram session invalid")
+                  return
+
+              print("Telegram OK")
+
+              last=load_last()
+              new_last=dict(last)
+
+              os.makedirs("dist",exist_ok=True)
+              updated=False
+              changelog=[]
 
               for pref in TARGET_PREFIX:
-                  ver, files = await find_latest(pref)
+                  ver,files=await find_latest(client,pref)
                   if not ver:
                       continue
 
-                  print("Latest", pref, ver)
-
-                  if last.get(pref) == ver:
-                      print("No change:", pref)
+                  if last.get(pref)==ver:
+                      print("No change",pref)
                       continue
 
-                  print("NEW:", pref, ver)
-                  updated = True
-                  new_last[pref] = ver
+                  print("NEW",pref,ver)
+                  updated=True
+                  new_last[pref]=ver
 
-                  base_dir = f"dl/{ver}"
-                  os.makedirs(base_dir, exist_ok=True)
+                  base=f"dl/{ver}"
+                  os.makedirs(base,exist_ok=True)
 
                   for k,msg in files.items():
-                      out = f"{base_dir}/{k}.tar.gz"
+                      out=f"{base}/{k}.tar.gz"
                       await msg.download_media(out)
 
-                  tar_name = f"dist/{ver}.tar.gz"
-                  os.system(f"tar -czf {tar_name} -C dl {ver}")
+                  tar=f"dist/{ver}.tar.gz"
+                  os.system(f"tar -czf {tar} -C dl {ver}")
 
-                  sha = sha256sum(tar_name)
+                  sha=sha256sum(tar)
                   changelog.append(f"## {ver}\n- sha256: `{sha}`\n")
+
+              await client.disconnect()
 
               if not updated:
                   print("No kernel updates")
-                  sys.exit(0)
+                  return
 
               save_last(new_last)
 
@@ -145,19 +157,21 @@ jobs:
                   f.write(f"# Kernel builds {datetime.date.today()}\n\n")
                   f.write("\n".join(changelog))
 
-          with client:
-              client.loop.run_until_complete(main())
+          import asyncio
+          asyncio.run(main())
           PY
 
       - name: Commit state
         run: |
-          git config user.name github-actions
-          git config user.email actions@github.com
-          git add .last_kernel || true
-          git commit -m "update kernel state" || true
-          git push || true
+          if [ -f .last_kernel ]; then
+            git config user.name github-actions
+            git config user.email actions@github.com
+            git add .last_kernel
+            git commit -m "update kernel state" || true
+            git push || true
+          fi
 
-      - name: Upload release
+      - name: Release
         if: hashFiles('dist/*.tar.gz') != ''
         uses: softprops/action-gh-release@v2
         with:
