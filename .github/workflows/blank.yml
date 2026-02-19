@@ -1,138 +1,86 @@
-name: Kernel From Telegram (Stable)
+name: Kernel From Telegram MTProto
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 03 * * 5"
+    - cron: "0 */6 * * *"
 
 jobs:
   kernel:
     runs-on: ubuntu-latest
 
-    env:
-      TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-      CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install Python deps
+        run: pip install telethon
 
-      - name: Restore offset
-        id: offset
+      - name: Restore session
         run: |
-          if [ -f tg_offset.txt ]; then
-            OFFSET=$(cat tg_offset.txt)
-          else
-            OFFSET=0
-          fi
-          echo "offset=$OFFSET" >> $GITHUB_OUTPUT
+          echo "${{ secrets.TG_SESSION }}" | base64 -d > tg.session
 
-      - name: Fetch updates
-        run: |
-          curl -s "https://api.telegram.org/bot$TOKEN/getUpdates?offset=${{ steps.offset.outputs.offset }}" > updates.json
-
-      - name: Save new offset
-        run: |
-          MAX=$(jq '.result[].update_id' updates.json | sort -n | tail -n1)
-          if [ "$MAX" != "" ]; then
-            echo $((MAX+1)) > tg_offset.txt
-          fi
-
-      - name: Extract document filenames
-        run: |
-          jq -r --arg CHAT "$CHAT_ID" '
-            .result[]
-            | select(.message.chat.id|tostring==$CHAT)
-            | select(.message.document != null)
-            | .message.document.file_name
-          ' updates.json > files.txt
-
-      - name: Detect latest version
-        id: ver
-        run: |
-          VER=$(grep -oP '[0-9]+\.[0-9]+\.[0-9]+-flippy-[0-9]+\+' files.txt | sort -V | tail -n1)
-          echo "Latest: $VER"
-          echo "ver=$VER" >> $GITHUB_OUTPUT
-
-      - name: Collect latest 4 files
-        run: |
-          VER=${{ steps.ver.outputs.ver }}
-          mkdir -p dl
-
-          jq -c --arg CHAT "$CHAT_ID" --arg VER "$VER" '
-            .result[]
-            | select(.message.chat.id|tostring==$CHAT)
-            | select(.message.document != null)
-            | select(.message.document.file_name | contains($VER))
-            | .message.document
-          ' updates.json > docs.json
-
-          COUNT=0
-
-          while read -r row; do
-            NAME=$(echo "$row" | jq -r '.file_name')
-            ID=$(echo "$row" | jq -r '.file_id')
-
-            if [[ "$NAME" == header-* || "$NAME" == modules-* || "$NAME" == boot-* || "$NAME" == dtb-amlogic-* ]]; then
-              COUNT=$((COUNT+1))
-
-              curl -s "https://api.telegram.org/bot$TOKEN/getFile?file_id=$ID" > file.json
-              PATHF=$(jq -r '.result.file_path' file.json)
-
-              curl -L -o "dl/$NAME" \
-                "https://api.telegram.org/file/bot$TOKEN/$PATHF"
-            fi
-          done < docs.json
-
-          echo "Found $COUNT kernel parts"
-
-          if [ "$COUNT" -ne 4 ]; then
-            echo "Kernel not complete, exit"
-            exit 0
-          fi
-
-      - name: Pack bundle
-        run: |
-          VER=${{ steps.ver.outputs.ver }}
-          tar -czf "$VER.tar.gz" -C dl .
-
-      - name: Delete old assets
+      - name: Download kernel
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_ID: ${{ secrets.TG_API_ID }}
+          API_HASH: ${{ secrets.TG_API_HASH }}
+          CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
-          REPO=${{ github.repository }}
+          python << 'PY'
+          import re, os
+          from telethon import TelegramClient
 
-          ID=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-            https://api.github.com/repos/$REPO/releases/tags/kernel_stable \
-            | jq -r '.id')
+          api_id = int(os.environ["API_ID"])
+          api_hash = os.environ["API_HASH"]
+          chat_id = int(os.environ["CHAT_ID"])
 
-          if [ "$ID" != "null" ]; then
-            ASSETS=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
-              https://api.github.com/repos/$REPO/releases/$ID/assets \
-              | jq -r '.[].id')
+          client = TelegramClient("tg", api_id, api_hash)
 
-            for A in $ASSETS; do
-              curl -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
-                https://api.github.com/repos/$REPO/releases/assets/$A
-            done
-          fi
+          async def main():
+              await client.start()
+
+              files = {}
+              ver_latest = None
+
+              async for msg in client.iter_messages(chat_id, limit=200):
+                  if not msg.file:
+                      continue
+
+                  name = msg.file.name or ""
+                  m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
+                  if not m:
+                      continue
+
+                  ver = m.group(1)
+
+                  if ver_latest is None or ver > ver_latest:
+                      ver_latest = ver
+                      files = {}
+
+                  if ver == ver_latest:
+                      if name.startswith(("header-", "modules-", "boot-", "dtb-amlogic-")):
+                          files[name] = msg
+
+              if len(files) != 4:
+                  print("Kernel incomplete")
+                  return
+
+              os.makedirs("dl", exist_ok=True)
+
+              for name, msg in files.items():
+                  print("Downloading", name)
+                  await msg.download_media(f"dl/{name}")
+
+              os.system(f"tar -czf {ver_latest}.tar.gz -C dl .")
+
+          with client:
+              client.loop.run_until_complete(main())
+          PY
 
       - name: Upload release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kernel_stable
           name: Kernel Stable
-          files: |
-            *.tar.gz
+          files: "*.tar.gz"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Commit offset
-        run: |
-          git config user.name actions
-          git config user.email actions@github.com
-          git add tg_offset.txt || true
-          git commit -m "update offset" || true
-          git push
