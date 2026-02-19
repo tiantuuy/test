@@ -3,7 +3,7 @@ name: Kernel stable
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"   # 每6小时检查一次
+    - cron: "0 */6 * * *"
 
 jobs:
   kernel:
@@ -26,82 +26,7 @@ jobs:
           API_HASH: ${{ secrets.TG_API_HASH }}
           CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
         run: |
-          python << 'PY'
-          import re, os, json
-          from telethon import TelegramClient
-
-          api_id = int(os.environ["API_ID"])
-          api_hash = os.environ["API_HASH"]
-          chat_id = int(os.environ["CHAT_ID"])
-
-          client = TelegramClient("tg", api_id, api_hash)
-
-          async def main():
-              await client.start()
-
-              targets = {
-                  "header": "header-",
-                  "modules": "modules-",
-                  "boot": "boot-",
-                  "dtb-amlogic": "dtb-amlogic-"
-              }
-
-              files = {}
-              ver_latest = None
-
-              async for msg in client.iter_messages(chat_id, limit=200):
-                  if not msg.file:
-                      continue
-
-                  name = msg.file.name or ""
-
-                  m = re.search(r'(\d+\.\d+\.\d+-flippy-\d+\+)', name)
-                  if not m:
-                      continue
-
-                  ver = m.group(1)
-
-                  if "6.18." not in ver:
-                      continue
-
-                  if ver_latest is None or ver > ver_latest:
-                      ver_latest = ver
-                      files = {}
-                      print("NEW VERSION:", ver_latest)
-
-                  if ver != ver_latest:
-                      continue
-
-                  for key, prefix in targets.items():
-                      if name.startswith(prefix):
-                          files[key] = msg
-                          print("MATCH", key, name)
-
-                  if len(files) == 4:
-                      break
-
-              if len(files) != 4:
-                  print("Kernel incomplete")
-                  return
-
-              # 输出版本给后续 step
-              with open("kernel.json", "w") as f:
-                  json.dump({"version": ver_latest}, f)
-
-              base_dir = f"dl/{ver_latest}"
-              os.makedirs(base_dir, exist_ok=True)
-
-              for key, msg in files.items():
-                  out = f"{base_dir}/{msg.file.name}"
-                  print("Downloading", msg.file.name)
-                  await msg.download_media(out)
-
-              tar_name = f"{ver_latest}.tar.gz"
-              os.system(f"tar -czf {tar_name} -C dl {ver_latest}")
-
-          with client:
-              client.loop.run_until_complete(main())
-          PY
+          python kr.py
 
       - name: Read version
         id: ver
@@ -109,6 +34,8 @@ jobs:
           if [ -f kernel.json ]; then
             VER=$(jq -r .version kernel.json)
             echo "version=$VER" >> $GITHUB_OUTPUT
+          else
+            echo "version=" >> $GITHUB_OUTPUT
           fi
 
       - name: Check previous version
