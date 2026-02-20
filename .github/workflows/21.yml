@@ -1,0 +1,137 @@
+name: CF Japan Best IP
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */12 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  cf-jp:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl \
+            netcat-openbsd \
+            openssl \
+            iputils-ping \
+            bc \
+            git \
+            python3 \
+            jq
+
+      - name: Get Cloudflare IP ranges
+        run: |
+          curl -s https://api.cloudflare.com/client/v4/ips | jq -r '.result.ipv4_cidrs[]' > cf_all_cidr.txt
+
+      - name: Sample IPs and verify Japan location
+        run: |
+          python3 scripts/find_jp_ips.py
+
+      - name: Test performance of Japan IPs
+        run: |
+          TIMESTAMP=$(date +'%Y%m%d_%H%M%S')
+          RESULT_FILE="cf_jp_best_${TIMESTAMP}.txt"
+          LATEST_FILE="cf_jp_best_latest.txt"
+          MARKDOWN_FILE="cf_jp_best.md"
+          
+          echo "# Cloudflare Japan Best IPs" > $MARKDOWN_FILE
+          echo "Generated at: $(date '+%Y-%m-%d %H:%M:%S')" >> $MARKDOWN_FILE
+          echo "" >> $MARKDOWN_FILE
+          echo "| IP Address | Response Time (ms) | Status |" >> $MARKDOWN_FILE
+          echo "|------------|-------------------|--------|" >> $MARKDOWN_FILE
+          
+          if [ ! -f "jp_ip_candidates.txt" ] || [ ! -s "jp_ip_candidates.txt" ]; then
+            echo "No Japan IPs found" > $RESULT_FILE
+            echo "| No Japan IPs found | - | Failed |" >> $MARKDOWN_FILE
+          else
+            while read ip; do
+              echo "Testing IP: $ip"
+              
+              if ! nc -z -w3 $ip 443 >/dev/null 2>&1; then
+                echo "| $ip | - | TCP Failed |" >> $MARKDOWN_FILE
+                continue
+              fi
+              
+              http_time=$(curl -o /dev/null -s -w '%{time_connect}' \
+                https://$ip \
+                --connect-timeout 3 \
+                --resolve cloudflare.com:443:$ip \
+                2>/dev/null)
+              
+              if [ $? -ne 0 ] || [ -z "$http_time" ]; then
+                echo "| $ip | - | HTTP Failed |" >> $MARKDOWN_FILE
+                continue
+              fi
+              
+              http_ms=$(echo "$http_time * 1000" | bc 2>/dev/null || echo "999")
+              
+              if (( $(echo "$http_ms < 500" | bc -l) )); then
+                echo "$ip $http_ms" >> results_temp.txt
+                echo "| $ip | ${http_ms}ms | ✅ Good |" >> $MARKDOWN_FILE
+              else
+                echo "| $ip | ${http_ms}ms | ⚠️ Slow |" >> $MARKDOWN_FILE
+              fi
+              
+            done < jp_ip_candidates.txt
+            
+            if [ -f "results_temp.txt" ] && [ -s "results_temp.txt" ]; then
+              sort -k2 -n results_temp.txt | head -20 > $RESULT_FILE
+              
+              echo "" >> $MARKDOWN_FILE
+              echo "## Top 10 Fastest IPs" >> $MARKDOWN_FILE
+              echo "" >> $MARKDOWN_FILE
+              head -10 $RESULT_FILE | while read ip time; do
+                echo "- $ip: ${time}ms" >> $MARKDOWN_FILE
+              done
+            else
+              echo "No good Japan IPs found" > $RESULT_FILE
+            fi
+          fi
+          
+          cp $RESULT_FILE $LATEST_FILE 2>/dev/null || true
+          
+          echo "=== Best IPs ==="
+          cat $RESULT_FILE
+
+      - name: Commit results
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git pull --rebase origin main || true
+          
+          git add cf_jp_best_*.txt cf_jp_best_latest.txt cf_jp_best.md jp_ips.json 2>/dev/null || true
+          git add jp_ip_candidates.txt 2>/dev/null || true
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "Update CF Japan best IPs $(date +'%Y-%m-%d %H:%M:%S')"
+            git push
+            echo "✅ Changes committed successfully"
+          else
+            echo "ℹ️ No changes to commit"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: cf-japan-ips
+          path: |
+            cf_jp_best_*.txt
+            cf_jp_best_latest.txt
+            cf_jp_best.md
+            jp_ips.json
+          retention-days: 30
