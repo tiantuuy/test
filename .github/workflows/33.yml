@@ -13,7 +13,7 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y grep sed awk netcat-openbsd
+          sudo apt-get install -y grep sed gawk netcat-openbsd
 
       - name: Fetch FOFA Japan Cloudflare HTML
         run: |
