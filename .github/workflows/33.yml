@@ -1,0 +1,63 @@
+name: CF Japan Best IP (Free FOFA)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */12 * * *"
+
+jobs:
+  cf-ip:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y grep sed awk netcat-openbsd
+
+      - name: Fetch FOFA Japan Cloudflare HTML
+        run: |
+          QUERY='server%3D%3D%22cloudflare%22%20%26%26%20country%3D%3D%22JP%22'
+          > ip_raw.txt
+
+          # 只获取第一页数据（免费用户只能访问第一页）
+          curl -s "https://fofa.info/result?qbase64=$(echo -n 'server=="cloudflare" && country=="JP"' | base64 -w0)&page=1" \
+          | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' >> ip_raw.txt
+
+          sort -u ip_raw.txt -o ip_raw.txt
+
+      - name: Detect open CF ports
+        run: |
+          > ip_port.txt
+          while read ip; do
+            for p in 443 80; do
+              if nc -z -w1 $ip $p 2>/dev/null; then
+                echo "$ip:$p" >> ip_port.txt
+              fi
+            done
+          done < ip_raw.txt
+
+      - name: TCP latency test
+        run: |
+          > ip_latency.txt
+          while read line; do
+            ip=$(echo $line | cut -d: -f1)
+            port=$(echo $line | cut -d: -f2)
+
+            t=$( (time -p nc -z -w1 $ip $port) 2>&1 | awk '/real/ {print $2}')
+            if [ ! -z "$t" ]; then
+              echo "$t $ip $port" >> ip_latency.txt
+            fi
+          done < ip_port.txt
+
+          sort -n ip_latency.txt -o ip_latency.txt
+          head -n 30 ip_latency.txt > best_cf_jp.txt
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf_japan_best_ip
+          path: |
+            ip_raw.txt
+            ip_port.txt
+            best_cf_jp.txt
