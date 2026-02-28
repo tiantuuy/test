@@ -2,7 +2,7 @@ name: Update IP Lists
 
 on:
   schedule:
-    - cron: "13 03 */3 * *"   # 每6小时运行一次
+    - cron: "13 04 * * *"   # 每6小时运行一次
   workflow_dispatch:        # 支持手动触发
 
 jobs:
