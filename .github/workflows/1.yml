@@ -70,7 +70,7 @@ jobs:
 
       - name: Upload release
         if: steps.check.outputs.same == 'false'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: kernel_stable
           name: Kernel_Stable
