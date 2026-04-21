@@ -22,7 +22,7 @@ def extract_ver(name):
 
 async def detect_latest_version(client, chat_id):
     """极速检测：只看最近10条"""
-    log("Fast check latest version (last 10 msgs)")
+    log("Fast check latest version (last 20 msgs)")
     latest = None
 
     async for msg in client.iter_messages(chat_id, limit=20):
@@ -49,7 +49,9 @@ async def collect_files(client, chat_id, target_ver):
         "header": "header-",
         "modules": "modules-",
         "boot": "boot-",
-        "dtb-amlogic": "dtb-amlogic-"
+        "dtb-amlogic": "dtb-amlogic-",
+        "dtb-allwinner": "dtb-allwinner-",
+        "dtb-rockchip ": "dtb-rockchip-",
     }
 
     files = {}
