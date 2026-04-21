@@ -51,7 +51,7 @@ async def collect_files(client, chat_id, target_ver):
         "boot": "boot-",
         "dtb-amlogic": "dtb-amlogic-",
         "dtb-allwinner": "dtb-allwinner-",
-        "dtb-rockchip ": "dtb-rockchip-",
+        "dtb-rockchip ": "dtb-rockchip-"
     }
 
     files = {}
