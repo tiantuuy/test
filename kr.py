@@ -51,7 +51,7 @@ async def collect_files(client, chat_id, target_ver):
         "boot": "boot-",
         "dtb-amlogic": "dtb-amlogic-",
         "dtb-allwinner": "dtb-allwinner-",
-        "dtb-rockchip ": "dtb-rockchip-"
+        "dtb-rockchip": "dtb-rockchip-"
     }
 
     files = {}
@@ -71,7 +71,7 @@ async def collect_files(client, chat_id, target_ver):
                 files[key] = msg
                 log(f"Matched {key}: {name}")
 
-        if len(files) == 4:
+        if len(files) == 6:
             break
 
     return files
@@ -106,9 +106,12 @@ async def main():
     # ====== 阶段2：完整扫描 ======
     files = await collect_files(client, chat_id, channel_ver)
 
-    if len(files) != 4:
-        log("ERROR: Kernel incomplete")
-        return
+    if len(files) != 6:
+    log(f"ERROR: incomplete {len(files)}/6")
+    for k in targets:
+        if k not in files:
+            log(f"Missing: {k}")
+    return
 
     with open("kernel.json", "w") as f:
         json.dump({"version": channel_ver}, f)
