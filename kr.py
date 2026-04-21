@@ -107,11 +107,11 @@ async def main():
     files = await collect_files(client, chat_id, channel_ver)
 
     if len(files) != 6:
-    log(f"ERROR: incomplete {len(files)}/6")
-    for k in targets:
-        if k not in files:
-            log(f"Missing: {k}")
-    return
+        log(f"ERROR: incomplete {len(files)}/6")
+        for k in targets:
+            if k not in files:
+               log(f"Missing: {k}")
+        return
 
     with open("kernel.json", "w") as f:
         json.dump({"version": channel_ver}, f)
