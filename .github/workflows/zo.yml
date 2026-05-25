@@ -24,5 +24,6 @@ jobs:
       - name: Run API test script
         run: |
           python test_zo_api.py \
+            --model-name "zo:zai/glm-5" \
             --input "Hello!" 
       
