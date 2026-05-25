@@ -3,9 +3,7 @@ name: Test Zo API
 on:
   workflow_dispatch:
 
-  push:
-    branches:
-      - main
+  
 
 jobs:
   test-api:
