@@ -1,0 +1,30 @@
+name: Test Zo API
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+
+jobs:
+  test-api:
+    runs-on: ubuntu-latest
+
+    env:
+      ZO_API_KEY: ${{ secrets.ZO_API_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run API test script
+        run: |
+          python test_zo_api.py \
+            --input "Hello from GitHub Actions!" \
+            --stream
