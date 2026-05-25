@@ -104,7 +104,14 @@ def main():
     status, headers, body = request_json(base_url, "GET", "/personas/available", token)
     print_response("personas GET /personas/available", status, headers, body)
 
-    payload: dict[str, object] = {"input": args.input}
+    payload: dict[str, object] = {
+        "messages": [
+            {
+                "role": "user",
+                "content": args.input
+            }
+        ]
+    }
     if args.model_name:
         payload["model_name"] = args.model_name
     if args.persona_id:
