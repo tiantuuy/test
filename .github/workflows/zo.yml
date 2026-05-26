@@ -3,7 +3,7 @@ name: Test Zo API
 on:
   workflow_dispatch:
   schedule:
-    - cron: "13 * * * *"
+    - cron: "*/20 * * * *"
   
 
 jobs:
