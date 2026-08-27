@@ -1,0 +1,195 @@
+name: Kernel LTS beifen
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 每周四 04:33 UTC
+    - cron: "33 04 * * 4"
+
+permissions:
+  contents: write
+
+jobs:
+
+  kernel:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ======================================================
+      # Checkout
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+
+      # ======================================================
+      # Python
+      # ======================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+          check-latest: false
+
+
+      # ======================================================
+      # Install dependencies
+      # ======================================================
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install telethon
+
+
+      # ======================================================
+      # Restore Telegram session
+      # ======================================================
+
+      - name: Restore Telegram session
+        env:
+          TG_SESSION: ${{ secrets.TG_SESSION }}
+        run: |
+          printf '%s' "$TG_SESSION" | base64 -d > tg.session
+
+          if [ ! -s tg.session ]; then
+            echo "ERROR: tg.session is empty"
+            exit 1
+          fi
+
+          echo "Telegram session restored"
+
+
+      # ======================================================
+      # Download and package LTS kernels
+      # ======================================================
+
+      - name: Get latest LTS kernels
+        env:
+          API_ID: ${{ secrets.TG_API_ID }}
+          API_HASH: ${{ secrets.TG_API_HASH }}
+          CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
+        run: |
+          python kr2.py
+
+
+      # ======================================================
+      # Show result
+      # ======================================================
+
+      - name: Show kernel result
+        run: |
+          echo "========================================"
+          echo "Kernel result"
+          echo "========================================"
+
+          if [ -f kernel-result.json ]; then
+            cat kernel-result.json
+          else
+            echo "ERROR: kernel-result.json not found"
+            exit 1
+          fi
+
+          echo
+          echo "========================================"
+          echo "Release files"
+          echo "========================================"
+
+          if [ -d release ]; then
+            ls -lh release/
+          else
+            echo "ERROR: release directory not found"
+            exit 1
+          fi
+
+
+      # ======================================================
+      # Detect whether anything changed
+      # ======================================================
+
+      - name: Check updates
+        id: check
+        shell: bash
+        run: |
+
+          CHANGED=$(jq -r '.changed | length' kernel-result.json)
+
+          echo "changed_count=$CHANGED" >> "$GITHUB_OUTPUT"
+
+          if [ "$CHANGED" -gt 0 ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Kernel update detected"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No kernel update"
+          fi
+
+
+      # ======================================================
+      # Commit version state
+      # ======================================================
+
+      - name: Commit kernel state
+        if: steps.check.outputs.changed == 'true'
+        run: |
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add latest.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit"
+            exit 0
+          fi
+
+          git commit -m "update LTS kernel versions"
+
+          git push
+
+
+      # ======================================================
+      # Create / update GitHub Release
+      # ======================================================
+
+      - name: Publish LTS kernel release
+        if: steps.check.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+
+          tag_name: kernel_lts
+
+          name: Kernel LTS Stable
+
+          body: |
+            Automatically maintained Flippy OpenWrt LTS kernels.
+
+            Supported LTS series:
+
+            - Linux 6.1
+            - Linux 6.12
+            - Linux 6.18
+
+            The workflow automatically checks the Flippy_OpenWrt
+            Telegram channel and updates each LTS series independently.
+
+            Current versions:
+
+            ${{ steps.check.outputs.changed_count }} series updated.
+
+          files: |
+            release/kernel-6.1.tar.gz
+            release/kernel-6.12.tar.gz
+            release/kernel-6.18.tar.gz
+
+          overwrite_files: true
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
