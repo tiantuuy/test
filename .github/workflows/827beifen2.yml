@@ -1,23 +1,48 @@
-name: Kernel LTS beifen
+name: Kernel LTS Stable
 
 on:
   workflow_dispatch:
 
   schedule:
     # 每周四 04:33 UTC
+    # 北京时间每周四 12:33
     - cron: "33 04 * * 4"
+
+
+# ============================================================
+# GitHub 权限
+# ============================================================
 
 permissions:
   contents: write
+
+
+# ============================================================
+# 防止同一个 Workflow 同时运行
+#
+# 如果手动运行和定时任务撞车：
+#
+# 第一个继续运行
+# 第二个等待
+#
+# 不取消正在下载 Telegram 文件的任务。
+# ============================================================
+
 concurrency:
   group: kernel-lts
   cancel-in-progress: false
+
 
 jobs:
 
   kernel:
 
+    name: Update Kernel LTS
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
 
     steps:
 
@@ -33,6 +58,11 @@ jobs:
 
       # ======================================================
       # Python
+      #
+      # 注意：
+      # 这里故意不使用 cache: pip
+      #
+      # 因为当前项目没有 requirements.txt / pyproject.toml。
       # ======================================================
 
       - name: Setup Python
@@ -43,10 +73,10 @@ jobs:
 
 
       # ======================================================
-      # Install dependencies
+      # Python dependencies
       # ======================================================
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install telethon
@@ -57,13 +87,26 @@ jobs:
       # ======================================================
 
       - name: Restore Telegram session
+        shell: bash
         env:
           TG_SESSION: ${{ secrets.TG_SESSION }}
         run: |
-          printf '%s' "$TG_SESSION" | base64 -d > tg.session
+
+          set -euo pipefail
+
+          if [ -z "$TG_SESSION" ]; then
+            echo "::error::TG_SESSION secret is empty"
+            exit 1
+          fi
+
+          printf '%s' "$TG_SESSION" \
+            | base64 --decode \
+            > tg.session
+
+          chmod 600 tg.session
 
           if [ ! -s tg.session ]; then
-            echo "ERROR: tg.session is empty"
+            echo "::error::tg.session is empty"
             exit 1
           fi
 
@@ -71,132 +114,273 @@ jobs:
 
 
       # ======================================================
-      # Download and package LTS kernels
+      # Run kernel downloader
       # ======================================================
 
       - name: Get latest LTS kernels
+        id: kernel
+        shell: bash
         env:
           API_ID: ${{ secrets.TG_API_ID }}
           API_HASH: ${{ secrets.TG_API_HASH }}
           CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
+
+          # Telegram 最近扫描 300 条
+          SCAN_LIMIT: "300"
+
         run: |
+
+          set -euo pipefail
+
           python kr2.py
 
 
       # ======================================================
-      # Show result
+      # Display result
       # ======================================================
 
       - name: Show kernel result
-        run: |
-          echo "========================================"
-          echo "Kernel result"
-          echo "========================================"
-
-          if [ -f kernel-result.json ]; then
-            cat kernel-result.json
-          else
-            echo "ERROR: kernel-result.json not found"
-            exit 1
-          fi
-
-          echo
-          echo "========================================"
-          echo "Release files"
-          echo "========================================"
-
-          if [ -d release ]; then
-            ls -lh release/
-          else
-            echo "ERROR: release directory not found"
-            exit 1
-          fi
-
-
-      # ======================================================
-      # Detect whether anything changed
-      # ======================================================
-
-      - name: Check updates
-        id: check
+        id: result
         shell: bash
         run: |
+
+          set -euo pipefail
+
+          if [ ! -f kernel-result.json ]; then
+            echo "::error::kernel-result.json not found"
+            exit 1
+          fi
+
+          echo "=========================================="
+          echo "Kernel result"
+          echo "=========================================="
+
+          cat kernel-result.json
+
+          echo
 
           CHANGED=$(jq -r '.changed | length' kernel-result.json)
 
-          echo "changed_count=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "changed_count=$CHANGED" \
+            >> "$GITHUB_OUTPUT"
 
           if [ "$CHANGED" -gt 0 ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "changed=true" \
+              >> "$GITHUB_OUTPUT"
+
             echo "Kernel update detected"
+
           else
-            echo "changed=false" >> "$GITHUB_OUTPUT"
+
+            echo "changed=false" \
+              >> "$GITHUB_OUTPUT"
+
             echo "No kernel update"
+
           fi
 
 
       # ======================================================
-      # Commit version state
+      # Validate Release files
+      # ======================================================
+
+      - name: Validate release archives
+        if: steps.result.outputs.changed == 'true'
+        shell: bash
+        run: |
+
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Generated release archives"
+          echo "=========================================="
+
+          ls -lh release/
+
+          echo
+
+          for series in 6.1 6.12 6.18; do
+
+            FILE="release/kernel-${series}.tar.gz"
+
+            if [ ! -f "$FILE" ]; then
+
+              echo "::error::Missing archive: $FILE"
+
+              exit 1
+
+            fi
+
+            SIZE=$(stat -c%s "$FILE")
+
+            if [ "$SIZE" -le 0 ]; then
+
+              echo "::error::Archive is empty: $FILE"
+
+              exit 1
+
+            fi
+
+            echo "$FILE : $SIZE bytes"
+
+          done
+
+
+      # ======================================================
+      # Validate 6.1 archive
+      #
+      # 确保 RK35xx + RK3588 都存在。
+      # ======================================================
+
+      - name: Validate 6.1 archive
+        if: steps.result.outputs.changed == 'true'
+        shell: bash
+        run: |
+
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "Validating 6.1 archive"
+          echo "=========================================="
+
+          rm -rf verify-61
+
+          mkdir -p verify-61
+
+          tar -xzf \
+            release/kernel-6.1.tar.gz \
+            -C verify-61
+
+          echo "Archive contents:"
+
+          find verify-61 \
+            -type f \
+            -print \
+            | sort
+
+          echo
+
+          COUNT=$(find verify-61 \
+            -type f \
+            | wc -l)
+
+          echo "6.1 file count: $COUNT"
+
+          if [ "$COUNT" -ne 8 ]; then
+
+            echo "::error::6.1 archive should contain 8 files, found $COUNT"
+
+            exit 1
+
+          fi
+
+          echo "6.1 archive OK"
+
+
+      # ======================================================
+      # Commit latest.json
+      #
+      # 只有 Python 已经完成下载和打包，
+      # 才会进入这里。
       # ======================================================
 
       - name: Commit kernel state
-        if: steps.check.outputs.changed == 'true'
+        if: steps.result.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          set -euo pipefail
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add latest.json
 
           if git diff --cached --quiet; then
+
             echo "No state changes to commit"
+
             exit 0
+
           fi
 
-          git commit -m "update LTS kernel versions"
+          git commit \
+            -m "update LTS kernel versions"
+
+          echo "Fetching latest remote main..."
 
           git fetch origin main
+
+          echo "Rebasing local commit..."
+
           git rebase origin/main
+
+          echo "Pushing updated main..."
+
           git push origin HEAD:main
 
 
       # ======================================================
-      # Create / update GitHub Release
+      # Publish / update GitHub Release
       # ======================================================
 
-      - name: Publish LTS kernel release
-        if: steps.check.outputs.changed == 'true'
+      - name: Publish Kernel LTS Release
+        if: steps.result.outputs.changed == 'true'
         uses: softprops/action-gh-release@v3
         with:
 
+          # 固定 Release Tag
           tag_name: kernel_lts
 
+          # 固定 Release 名称
           name: Kernel LTS Stable
 
-          body: |
-            Automatically maintained Flippy OpenWrt LTS kernels.
-
-            Supported LTS series:
-
-            - Linux 6.1
-            - Linux 6.12
-            - Linux 6.18
-
-            The workflow automatically checks the Flippy_OpenWrt
-            Telegram channel and updates each LTS series independently.
-
-            Current versions:
-
-            ${{ steps.check.outputs.changed_count }} series updated.
-
+          # 三个稳定资产
           files: |
             release/kernel-6.1.tar.gz
             release/kernel-6.12.tar.gz
             release/kernel-6.18.tar.gz
 
+          # 同名资产覆盖
           overwrite_files: true
 
+          # 如果文件不存在则失败
+          fail_on_unmatched_files: true
+
+          # Release 说明
+          body: |
+            # Kernel LTS Stable
+
+            Automatically maintained Flippy OpenWrt LTS kernels.
+
+            Supported kernel series:
+
+            - Linux 6.1
+            - Linux 6.12
+            - Linux 6.18
+
+            The files are automatically detected from the
+            Flippy OpenWrt Telegram channel.
+
+            Linux 6.1 contains both hardware targets:
+
+            - RK35xx
+            - RK3588
+
+            Current kernel versions are recorded in `latest.json`.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # ======================================================
+      # Cleanup
+      # ======================================================
+
+      - name: Cleanup Telegram session
+        if: always()
+        shell: bash
+        run: |
+          rm -f tg.session
