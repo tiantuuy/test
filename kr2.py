@@ -1618,35 +1618,22 @@ async def main():
                 f"latest={target_version}"
             )
 
-            archive = release_filename(
-                group
-            )
+            
 
             # =================================================
             # 已经是最新
             # =================================================
+            # =================================================
+            # 已经是最新
+            # =================================================
 
-            if (
-                previous_version
-                == target_version
-            ):
-
-                if archive.exists():
-
-                    log(
-                        f"[{group}] "
-                        f"{target_version} "
-                        f"already current"
-                    )
-
-                    continue
-
+            # 新代码 - 只检查版本号
+            if previous_version == target_version:
                 log(
                     f"[{group}] "
-                    f"State is current but archive "
-                    f"is missing, rebuild"
+                    f"{target_version} already current, skip"
                 )
-
+                continue
             # =================================================
             # 再次检查完整性
             # =================================================
