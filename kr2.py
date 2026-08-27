@@ -927,6 +927,16 @@ def package_release(
             ├── modules...
             ├── boot...
             └── dtb-rockchip...
+
+    6.12 / 6.18 内部：
+
+        6.12.105-flippy-95+o/
+        ├── boot-6.12.105-flippy-95+o.tar.gz
+        ├── dtb-allwinner-6.12.105-flippy-95+o.tar.gz
+        ├── dtb-amlogic-6.12.105-flippy-95+o.tar.gz
+        ├── dtb-rockchip-6.12.105-flippy-95+o.tar.gz
+        ├── header-6.12.105-flippy-95+o.tar.gz
+        └── modules-6.12.105-flippy-95+o.tar.gz
     """
 
     RELEASE_ROOT.mkdir(
@@ -978,8 +988,14 @@ def package_release(
                     raise RuntimeError(
                         f"[{series}] "
                         f"Missing target directory: "
-                        f"{target}"
+                        f"{target_dir}"
                     )
+
+                log(
+                    f"[{series}] "
+                    f"Adding directory: "
+                    f"{target_dir}"
+                )
 
                 # 包内结构：
                 #
@@ -995,14 +1011,49 @@ def package_release(
 
         # ----------------------------------------------------
         # 6.12 / 6.18
+        #
+        # 注意：
+        #
+        # files 的 key 是：
+        #
+        #   boot
+        #   header
+        #   modules
+        #   ...
+        #
+        # 但真正的磁盘文件名是：
+        #
+        #   boot-6.12.105-flippy-95+o.tar.gz
+        #   header-6.12.105-flippy-95+o.tar.gz
+        #   ...
+        #
+        # 因此不能：
+        #
+        #   version_dir / key
+        #
+        # 必须使用：
+        #
+        #   files[key]["filename"]
         # ----------------------------------------------------
 
         else:
 
-            for filename in sorted(files):
+            for key in sorted(files):
+
+                item = files[key]
+
+                filename = item[
+                    "filename"
+                ]
 
                 source_file = (
                     version_dir / filename
+                )
+
+                log(
+                    f"[{series}] "
+                    f"Adding file: "
+                    f"{source_file}"
                 )
 
                 if not source_file.exists():
@@ -1010,6 +1061,27 @@ def package_release(
                     raise RuntimeError(
                         f"[{series}] "
                         f"Missing file: "
+                        f"{source_file}"
+                    )
+
+                if not source_file.is_file():
+
+                    raise RuntimeError(
+                        f"[{series}] "
+                        f"Expected regular file, "
+                        f"but found: "
+                        f"{source_file}"
+                    )
+
+                file_size = (
+                    source_file.stat().st_size
+                )
+
+                if file_size == 0:
+
+                    raise RuntimeError(
+                        f"[{series}] "
+                        f"File is empty: "
                         f"{source_file}"
                     )
 
