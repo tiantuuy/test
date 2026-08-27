@@ -25,7 +25,7 @@ async def detect_latest_version(client, chat_id):
     log("Fast check latest version (last 1500 msgs)")
     latest = None
 
-    async for msg in client.iter_messages(chat_id, limit=20):
+    async for msg in client.iter_messages(chat_id, limit=500):
         if not msg.file:
             continue
 
@@ -56,7 +56,7 @@ async def collect_files(client, chat_id, target_ver):
 
     files = {}
 
-    async for msg in client.iter_messages(chat_id, limit=30):
+    async for msg in client.iter_messages(chat_id, limit=500):
         if not msg.file:
             continue
 
