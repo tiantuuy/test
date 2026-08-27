@@ -136,7 +136,7 @@ jobs:
           CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
 
           # Telegram 最近扫描 300 条
-          SCAN_LIMIT: "300"
+          SCAN_LIMIT: "1000"
 
         run: |
 
