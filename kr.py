@@ -22,7 +22,7 @@ def extract_ver(name):
 
 async def detect_latest_version(client, chat_id):
     """极速检测：只看最近20条"""
-    log("Fast check latest version (last 20 msgs)")
+    log("Fast check latest version (last 500 msgs)")
     latest = None
 
     async for msg in client.iter_messages(chat_id, limit=20):
@@ -33,7 +33,7 @@ async def detect_latest_version(client, chat_id):
         if not ver:
             continue
 
-        if "6.18." not in ver:
+        if "6.1." not in ver:
             continue
 
         if latest is None or ver > latest:
