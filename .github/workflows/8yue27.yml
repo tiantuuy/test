@@ -121,12 +121,12 @@ jobs:
           #
           # 如果以后频道消息特别多，
           # 可以通过修改这里调整。
-          CHANNEL_SCAN_LIMIT: "500"
+          CHANNEL_SCAN_LIMIT: "50"
 
         run: |
           set -euo pipefail
 
-          python kr.py
+          python kr1.py
 
 
       # ===================================================
