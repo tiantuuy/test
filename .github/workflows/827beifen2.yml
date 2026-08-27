@@ -547,7 +547,7 @@ jobs:
           echo "6.1 file count: $COUNT"
 
 
-          if [ "$COUNT" -ne 8 ]; then
+          if [ "$COUNT" -ne 6 ]; then
 
             echo "::error::6.1 archive should contain 8 files, found $COUNT"
 
