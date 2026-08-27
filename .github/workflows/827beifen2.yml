@@ -19,6 +19,13 @@ permissions:
 
 # ============================================================
 # 防止同一个 Workflow 同时运行
+#
+# 如果手动运行和定时任务撞车：
+#
+# 第一个继续运行
+# 第二个等待
+#
+# 不取消正在下载 Telegram 文件的任务。
 # ============================================================
 
 concurrency:
@@ -62,6 +69,8 @@ jobs:
 
       # ======================================================
       # Python dependencies
+      #
+      # 当前项目没有 requirements.txt / pyproject.toml。
       # ======================================================
 
       - name: Install dependencies
@@ -104,13 +113,18 @@ jobs:
       # ======================================================
       # Run kernel downloader
       #
-      # kr2.py 生成：
+      # kr2.py 根据 latest.json 比较 Telegram 最新版本。
       #
-      # kernel-6.1-rk35xx.tar.gz
-      # kernel-6.1-rk3588.tar.gz
-      # kernel-6.1.tar.gz
-      # kernel-6.12.tar.gz
-      # kernel-6.18.tar.gz
+      # 本次可能：
+      #
+      # 0 个更新
+      # 1 个更新
+      # 2 个更新
+      # 3 个更新
+      # 4 个更新
+      # 5 个更新
+      #
+      # 只生成实际发生变化的 release 文件。
       # ======================================================
 
       - name: Get latest LTS kernels
@@ -133,6 +147,16 @@ jobs:
 
       # ======================================================
       # Display result
+      #
+      # 同时输出：
+      #
+      # changed
+      # changed_count
+      # has_changes
+      #
+      # changed 是 JSON 数组，例如：
+      #
+      # ["6.1","6.12"]
       # ======================================================
 
       - name: Show kernel result
@@ -155,21 +179,36 @@ jobs:
 
           echo
 
-          CHANGED=$(jq -r '.changed | length' kernel-result.json)
+          CHANGED=$(jq -c '.changed' kernel-result.json)
 
-          echo "changed_count=$CHANGED" \
+          CHANGED_COUNT=$(jq '.changed | length' kernel-result.json)
+
+          echo "=========================================="
+          echo "Changed release groups"
+          echo "=========================================="
+
+          echo "$CHANGED"
+
+          echo
+
+          echo "Changed count: $CHANGED_COUNT"
+
+          echo "changed=$CHANGED" \
             >> "$GITHUB_OUTPUT"
 
-          if [ "$CHANGED" -gt 0 ]; then
+          echo "changed_count=$CHANGED_COUNT" \
+            >> "$GITHUB_OUTPUT"
 
-            echo "changed=true" \
+          if [ "$CHANGED_COUNT" -gt 0 ]; then
+
+            echo "has_changes=true" \
               >> "$GITHUB_OUTPUT"
 
             echo "Kernel update detected"
 
           else
 
-            echo "changed=false" \
+            echo "has_changes=false" \
               >> "$GITHUB_OUTPUT"
 
             echo "No kernel update"
@@ -178,91 +217,131 @@ jobs:
 
 
       # ======================================================
-      # Validate latest.json
+      # Validate kernel-result.json
       #
-      # 必须包含：
-      #
-      # 6.1
-      # 6.1-rk35xx
-      # 6.1-rk3588
-      # 6.12
-      # 6.18
+      # 检查 kr2.py 输出结构。
       # ======================================================
 
-      - name: Validate latest.json
-        if: steps.result.outputs.changed == 'true'
+      - name: Validate kernel result
+        if: steps.result.outputs.has_changes == 'true'
         shell: bash
         run: |
 
           set -euo pipefail
 
-          if [ ! -f latest.json ]; then
-            echo "::error::latest.json not found"
-            exit 1
-          fi
-
           echo "=========================================="
-          echo "Validating latest.json"
+          echo "Validating kernel-result.json"
           echo "=========================================="
 
-          cat latest.json
 
-          echo
+          # --------------------------------------------------
+          # 检查必要字段
+          # --------------------------------------------------
 
-          for SERIES in \
-            "6.1" \
-            "6.1-rk35xx" \
-            "6.1-rk3588" \
-            "6.12" \
-            "6.18"
+          for FIELD in \
+            changed \
+            versions \
+            current_versions \
+            release_groups \
+            release_files
           do
 
-            VERSION=$(jq -r --arg series "$SERIES" '.[$series]' latest.json)
+            if ! jq -e --arg field "$FIELD" '.[$field] != null' kernel-result.json > /dev/null; then
 
-            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-
-              echo "::error::Missing version for $SERIES"
+              echo "::error::Missing field: $FIELD"
 
               exit 1
 
             fi
 
-            echo "$SERIES = $VERSION"
-
           done
 
+
+          # --------------------------------------------------
+          # 检查 changed 中的组是否合法
+          # --------------------------------------------------
+
+          jq -e '
+            all(
+              .changed[];
+              . as $group |
+              .release_groups |
+              index($group) != null
+            )
+          ' kernel-result.json > /dev/null
+
+          echo "Changed release groups are valid"
+
+
+          # --------------------------------------------------
+          # 检查 changed 对应的 release_files
+          # --------------------------------------------------
+
+          while IFS= read -r GROUP
+          do
+
+            FILE=$(jq -r \
+              --arg group "$GROUP" \
+              '.release_files[$group]' \
+              kernel-result.json)
+
+            if [ -z "$FILE" ] || [ "$FILE" = "null" ]; then
+
+              echo "::error::No release file for changed group: $GROUP"
+
+              exit 1
+
+            fi
+
+            echo "$GROUP -> $FILE"
+
+          done < <(
+            jq -r '.changed[]' kernel-result.json
+          )
+
           echo
-          echo "latest.json OK"
+
+          echo "kernel-result.json OK"
 
 
       # ======================================================
-      # Validate release archives
+      # Validate changed release archives
       #
-      # kr2.py 必须生成 5 个文件
+      # 只检查本次 changed 的文件。
+      #
+      # 不要求其它未更新的文件存在。
       # ======================================================
 
-      - name: Validate release archives
-        if: steps.result.outputs.changed == 'true'
+      - name: Validate changed release files
+        if: steps.result.outputs.has_changes == 'true'
         shell: bash
         run: |
 
           set -euo pipefail
 
           echo "=========================================="
-          echo "Generated release archives"
+          echo "Validating changed release files"
           echo "=========================================="
 
-          ls -lh release/
 
-          echo
-
-          for FILE in \
-            "release/kernel-6.1-rk35xx.tar.gz" \
-            "release/kernel-6.1-rk3588.tar.gz" \
-            "release/kernel-6.1.tar.gz" \
-            "release/kernel-6.12.tar.gz" \
-            "release/kernel-6.18.tar.gz"
+          while IFS=$'\t' read -r GROUP FILE
           do
+
+            echo
+            echo "------------------------------------------"
+            echo "Release group: $GROUP"
+            echo "File: $FILE"
+            echo "------------------------------------------"
+
+
+            if [ -z "$FILE" ] || [ "$FILE" = "null" ]; then
+
+              echo "::error::Release file is empty for $GROUP"
+
+              exit 1
+
+            fi
+
 
             if [ ! -f "$FILE" ]; then
 
@@ -272,7 +351,9 @@ jobs:
 
             fi
 
+
             SIZE=$(stat -c%s "$FILE")
+
 
             if [ "$SIZE" -le 0 ]; then
 
@@ -282,21 +363,35 @@ jobs:
 
             fi
 
-            echo "$FILE : $SIZE bytes"
 
-          done
+            echo "Archive size: $SIZE bytes"
+            echo "Archive OK"
+
+
+          done < <(
+            jq -r '
+              .changed[] as $group |
+              "\($group)\t\(.release_files[$group])"
+            ' kernel-result.json
+          )
+
+
+          echo
+          echo "All changed release files are valid"
 
 
       # ======================================================
       # Validate 6.1 archive
       #
-      # kernel-6.1.tar.gz
+      # 只有 6.1 本次发生更新才执行。
       #
-      # 必须包含 8 files
+      # 如果本次没有 6.1 更新：
+      #
+      # 不执行这个检查。
       # ======================================================
 
       - name: Validate 6.1 archive
-        if: steps.result.outputs.changed == 'true'
+        if: steps.result.outputs.has_changes == 'true' && contains(fromJSON(steps.result.outputs.changed), '6.1')
         shell: bash
         run: |
 
@@ -306,13 +401,26 @@ jobs:
           echo "Validating 6.1 archive"
           echo "=========================================="
 
+          FILE=$(jq -r '.release_files["6.1"]' kernel-result.json)
+
+          if [ ! -f "$FILE" ]; then
+
+            echo "::error::6.1 archive not found: $FILE"
+
+            exit 1
+
+          fi
+
+
           rm -rf verify-61
 
           mkdir -p verify-61
 
+
           tar -xzf \
-            release/kernel-6.1.tar.gz \
+            "$FILE" \
             -C verify-61
+
 
           echo "Archive contents:"
 
@@ -321,13 +429,17 @@ jobs:
             -print \
             | sort
 
+
           echo
+
 
           COUNT=$(find verify-61 \
             -type f \
             | wc -l)
 
+
           echo "6.1 file count: $COUNT"
+
 
           if [ "$COUNT" -ne 8 ]; then
 
@@ -337,264 +449,257 @@ jobs:
 
           fi
 
+
           echo "6.1 archive OK"
 
 
       # ======================================================
-      # Prepare release directories
+      # Prepare upload files
       #
-      # 最终目录结构：
+      # 根据 changed 动态处理。
       #
-      # release/
+      # Release 映射：
       #
-      # ├── kernel_stable/
-      # │   ├── 6.1.xxxxx.tar.gz
-      # │   ├── 6.12.xxxxx.tar.gz
-      # │   └── 6.18.xxxxx.tar.gz
-      # │
-      # ├── 6.1-rk35xx/
-      # │   └── 6.1.xxxxx.tar.gz
-      # │
-      # └── 6.1-rk3588/
-      #     └── 6.1.xxxxx.tar.gz
+      # 6.1          -> kernel_stable
+      # 6.12         -> kernel_stable
+      # 6.18         -> kernel_stable
       #
-      # 使用独立目录避免不同 Release 上传文件时互相匹配。
+      # 6.1-rk35xx   -> 6.1-rk35xx
+      # 6.1-rk3588   -> 6.1-rk3588
+      #
+      # 文件名使用 versions 中的更新后版本。
       # ======================================================
 
       - name: Prepare release files
-        if: steps.result.outputs.changed == 'true'
+        if: steps.result.outputs.has_changes == 'true'
         shell: bash
         run: |
 
           set -euo pipefail
 
-          VERSION_61=$(jq -r '.["6.1"]' latest.json)
-          VERSION_61_RK35XX=$(jq -r '.["6.1-rk35xx"]' latest.json)
-          VERSION_61_RK3588=$(jq -r '.["6.1-rk3588"]' latest.json)
-          VERSION_612=$(jq -r '.["6.12"]' latest.json)
-          VERSION_618=$(jq -r '.["6.18"]' latest.json)
-
-          echo "6.1          = $VERSION_61"
-          echo "6.1-rk35xx   = $VERSION_61_RK35XX"
-          echo "6.1-rk3588   = $VERSION_61_RK3588"
-          echo "6.12         = $VERSION_612"
-          echo "6.18         = $VERSION_618"
-
-          echo
-
-          # --------------------------------------------------
-          # 检查版本号
-          # --------------------------------------------------
-
-          for VERSION in \
-            "$VERSION_61" \
-            "$VERSION_61_RK35XX" \
-            "$VERSION_61_RK3588" \
-            "$VERSION_612" \
-            "$VERSION_618"
-          do
-
-            if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-
-              echo "::error::Kernel version is empty"
-
-              exit 1
-
-            fi
-
-          done
+          echo "=========================================="
+          echo "Preparing release files"
+          echo "=========================================="
 
 
-          # --------------------------------------------------
-          # 创建三个 Release 对应目录
-          # --------------------------------------------------
-
-          rm -rf release/kernel_stable
-          rm -rf release/6.1-rk35xx
-          rm -rf release/6.1-rk3588
-
-          mkdir -p release/kernel_stable
-          mkdir -p release/6.1-rk35xx
-          mkdir -p release/6.1-rk3588
+          rm -rf release-upload
 
 
-          # --------------------------------------------------
+          mkdir -p release-upload/kernel_stable
+          mkdir -p release-upload/6.1-rk35xx
+          mkdir -p release-upload/6.1-rk3588
+
+
+          # ==================================================
           # kernel_stable
           #
           # 6.1
+          # ==================================================
+
+          if jq -e '.changed | index("6.1")' kernel-result.json > /dev/null; then
+
+            FILE=$(jq -r '.release_files["6.1"]' kernel-result.json)
+
+            VERSION=$(jq -r '.versions["6.1"]' kernel-result.json)
+
+            cp \
+              "$FILE" \
+              "release-upload/kernel_stable/${VERSION}.tar.gz"
+
+            echo "kernel_stable: $VERSION.tar.gz"
+
+          fi
+
+
+          # ==================================================
+          # kernel_stable
+          #
           # 6.12
+          # ==================================================
+
+          if jq -e '.changed | index("6.12")' kernel-result.json > /dev/null; then
+
+            FILE=$(jq -r '.release_files["6.12"]' kernel-result.json)
+
+            VERSION=$(jq -r '.versions["6.12"]' kernel-result.json)
+
+            cp \
+              "$FILE" \
+              "release-upload/kernel_stable/${VERSION}.tar.gz"
+
+            echo "kernel_stable: $VERSION.tar.gz"
+
+          fi
+
+
+          # ==================================================
+          # kernel_stable
+          #
           # 6.18
-          # --------------------------------------------------
+          # ==================================================
 
-          mv \
-            "release/kernel-6.1.tar.gz" \
-            "release/kernel_stable/${VERSION_61}.tar.gz"
+          if jq -e '.changed | index("6.18")' kernel-result.json > /dev/null; then
 
-          mv \
-            "release/kernel-6.12.tar.gz" \
-            "release/kernel_stable/${VERSION_612}.tar.gz"
+            FILE=$(jq -r '.release_files["6.18"]' kernel-result.json)
 
-          mv \
-            "release/kernel-6.18.tar.gz" \
-            "release/kernel_stable/${VERSION_618}.tar.gz"
+            VERSION=$(jq -r '.versions["6.18"]' kernel-result.json)
+
+            cp \
+              "$FILE" \
+              "release-upload/kernel_stable/${VERSION}.tar.gz"
+
+            echo "kernel_stable: $VERSION.tar.gz"
+
+          fi
 
 
-          # --------------------------------------------------
+          # ==================================================
           # 6.1-rk35xx
-          # --------------------------------------------------
+          # ==================================================
 
-          mv \
-            "release/kernel-6.1-rk35xx.tar.gz" \
-            "release/6.1-rk35xx/${VERSION_61_RK35XX}.tar.gz"
+          if jq -e '.changed | index("6.1-rk35xx")' kernel-result.json > /dev/null; then
+
+            FILE=$(jq -r '.release_files["6.1-rk35xx"]' kernel-result.json)
+
+            VERSION=$(jq -r '.versions["6.1-rk35xx"]' kernel-result.json)
+
+            cp \
+              "$FILE" \
+              "release-upload/6.1-rk35xx/${VERSION}.tar.gz"
+
+            echo "6.1-rk35xx: $VERSION.tar.gz"
+
+          fi
 
 
-          # --------------------------------------------------
+          # ==================================================
           # 6.1-rk3588
-          # --------------------------------------------------
+          # ==================================================
 
-          mv \
-            "release/kernel-6.1-rk3588.tar.gz" \
-            "release/6.1-rk3588/${VERSION_61_RK3588}.tar.gz"
+          if jq -e '.changed | index("6.1-rk3588")' kernel-result.json > /dev/null; then
+
+            FILE=$(jq -r '.release_files["6.1-rk3588"]' kernel-result.json)
+
+            VERSION=$(jq -r '.versions["6.1-rk3588"]' kernel-result.json)
+
+            cp \
+              "$FILE" \
+              "release-upload/6.1-rk3588/${VERSION}.tar.gz"
+
+            echo "6.1-rk3588: $VERSION.tar.gz"
+
+          fi
 
 
+          echo
           echo "=========================================="
           echo "Prepared release files"
           echo "=========================================="
 
-          find release \
-            -maxdepth 2 \
+
+          find release-upload \
             -type f \
             -print \
             | sort
 
 
       # ======================================================
-      # Validate prepared release files
+      # Validate prepared upload files
       # ======================================================
 
       - name: Validate prepared release files
-        if: steps.result.outputs.changed == 'true'
+        if: steps.result.outputs.has_changes == 'true'
         shell: bash
         run: |
 
           set -euo pipefail
 
-          VERSION_61=$(jq -r '.["6.1"]' latest.json)
-          VERSION_61_RK35XX=$(jq -r '.["6.1-rk35xx"]' latest.json)
-          VERSION_61_RK3588=$(jq -r '.["6.1-rk3588"]' latest.json)
-          VERSION_612=$(jq -r '.["6.12"]' latest.json)
-          VERSION_618=$(jq -r '.["6.18"]' latest.json)
+          echo "=========================================="
+          echo "Validating prepared release files"
+          echo "=========================================="
 
 
-          # --------------------------------------------------
-          # kernel_stable
-          # --------------------------------------------------
+          COUNT=$(find release-upload \
+            -type f \
+            | wc -l)
 
-          for FILE in \
-            "release/kernel_stable/${VERSION_61}.tar.gz" \
-            "release/kernel_stable/${VERSION_612}.tar.gz" \
-            "release/kernel_stable/${VERSION_618}.tar.gz"
+
+          echo "Prepared file count: $COUNT"
+
+
+          if [ "$COUNT" -le 0 ]; then
+
+            echo "::error::No release files prepared"
+
+            exit 1
+
+          fi
+
+
+          while IFS= read -r FILE
           do
 
             if [ ! -f "$FILE" ]; then
 
-              echo "::error::Missing archive: $FILE"
+              echo "::error::Missing prepared file: $FILE"
 
               exit 1
 
             fi
+
 
             SIZE=$(stat -c%s "$FILE")
 
+
             if [ "$SIZE" -le 0 ]; then
 
-              echo "::error::Archive is empty: $FILE"
+              echo "::error::Prepared file is empty: $FILE"
 
               exit 1
 
             fi
 
+
             echo "$FILE : $SIZE bytes"
 
-          done
 
-
-          # --------------------------------------------------
-          # 6.1-rk35xx
-          # --------------------------------------------------
-
-          FILE="release/6.1-rk35xx/${VERSION_61_RK35XX}.tar.gz"
-
-          if [ ! -f "$FILE" ]; then
-
-            echo "::error::Missing archive: $FILE"
-
-            exit 1
-
-          fi
-
-          SIZE=$(stat -c%s "$FILE")
-
-          if [ "$SIZE" -le 0 ]; then
-
-            echo "::error::Archive is empty: $FILE"
-
-            exit 1
-
-          fi
-
-          echo "$FILE : $SIZE bytes"
-
-
-          # --------------------------------------------------
-          # 6.1-rk3588
-          # --------------------------------------------------
-
-          FILE="release/6.1-rk3588/${VERSION_61_RK3588}.tar.gz"
-
-          if [ ! -f "$FILE" ]; then
-
-            echo "::error::Missing archive: $FILE"
-
-            exit 1
-
-          fi
-
-          SIZE=$(stat -c%s "$FILE")
-
-          if [ "$SIZE" -le 0 ]; then
-
-            echo "::error::Archive is empty: $FILE"
-
-            exit 1
-
-          fi
-
-          echo "$FILE : $SIZE bytes"
+          done < <(
+            find release-upload \
+              -type f \
+              -print
+          )
 
 
           echo
-          echo "All release files are valid"
+          echo "All prepared release files are valid"
 
 
       # ======================================================
       # Commit latest.json
+      #
+      # 只有实际发生更新才提交。
+      #
+      # 0 个更新不会修改 latest.json。
       # ======================================================
 
       - name: Commit kernel state
-        if: steps.result.outputs.changed == 'true'
+        if: steps.result.outputs.has_changes == 'true'
         shell: bash
         run: |
 
           set -euo pipefail
 
+
           git config user.name \
             "github-actions[bot]"
+
 
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
+
           git add latest.json
+
 
           if git diff --cached --quiet; then
 
@@ -604,18 +709,25 @@ jobs:
 
           fi
 
+
           git commit \
             -m "update LTS kernel versions"
 
+
           echo "Fetching latest remote main..."
+
 
           git fetch origin main
 
+
           echo "Rebasing local commit..."
+
 
           git rebase origin/main
 
+
           echo "Pushing updated main..."
+
 
           git push origin HEAD:main
 
@@ -623,18 +735,21 @@ jobs:
       # ======================================================
       # Publish kernel_stable
       #
-      # Tag:
-      #   kernel_stable
-      #
-      # 上传：
+      # 只有以下任意一个发生变化才执行：
       #
       # 6.1
       # 6.12
       # 6.18
+      #
+      # Tag：
+      #
+      # kernel_stable
+      #
+      # 每次只上传本次实际更新的文件。
       # ======================================================
 
       - name: Publish kernel_stable Release
-        if: steps.result.outputs.changed == 'true'
+        if: steps.result.outputs.has_changes == 'true' && (contains(fromJSON(steps.result.outputs.changed), '6.1') || contains(fromJSON(steps.result.outputs.changed), '6.12') || contains(fromJSON(steps.result.outputs.changed), '6.18'))
         uses: softprops/action-gh-release@v3
         with:
 
@@ -643,7 +758,7 @@ jobs:
           name: kernel_stable
 
           files: |
-            release/kernel_stable/*.tar.gz
+            release-upload/kernel_stable/*.tar.gz
 
           overwrite_files: false
 
@@ -662,8 +777,8 @@ jobs:
 
             Current kernel versions are recorded in `latest.json`.
 
-            RK35xx and RK3588 specific 6.1 kernels are published
-            in their own independent releases.
+            RK35xx and RK3588 specific Linux 6.1 kernels
+            are published in their own independent releases.
 
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -672,14 +787,15 @@ jobs:
       # ======================================================
       # Publish 6.1-rk35xx
       #
-      # Tag:
-      #   6.1-rk35xx
+      # 只有 6.1-rk35xx 更新才执行。
       #
-      # 只上传 RK35xx。
+      # Tag：
+      #
+      # 6.1-rk35xx
       # ======================================================
 
       - name: Publish 6.1-rk35xx Release
-        if: steps.result.outputs.changed == 'true'
+        if: steps.result.outputs.has_changes == 'true' && contains(fromJSON(steps.result.outputs.changed), '6.1-rk35xx')
         uses: softprops/action-gh-release@v3
         with:
 
@@ -688,7 +804,7 @@ jobs:
           name: 6.1-rk35xx
 
           files: |
-            release/6.1-rk35xx/*.tar.gz
+            release-upload/6.1-rk35xx/*.tar.gz
 
           overwrite_files: false
 
@@ -709,14 +825,15 @@ jobs:
       # ======================================================
       # Publish 6.1-rk3588
       #
-      # Tag:
-      #   6.1-rk3588
+      # 只有 6.1-rk3588 更新才执行。
       #
-      # 只上传 RK3588。
+      # Tag：
+      #
+      # 6.1-rk3588
       # ======================================================
 
       - name: Publish 6.1-rk3588 Release
-        if: steps.result.outputs.changed == 'true'
+        if: steps.result.outputs.has_changes == 'true' && contains(fromJSON(steps.result.outputs.changed), '6.1-rk3588')
         uses: softprops/action-gh-release@v3
         with:
 
@@ -725,7 +842,7 @@ jobs:
           name: 6.1-rk3588
 
           files: |
-            release/6.1-rk3588/*.tar.gz
+            release-upload/6.1-rk3588/*.tar.gz
 
           overwrite_files: false
 
