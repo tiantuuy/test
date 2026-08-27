@@ -505,7 +505,7 @@ jobs:
       # 历史版本继续保留在 GitHub Release。
       # ======================================================
 
-      - name: Publish Kernel LTS Release
+      - name: Publish Kernel Release
         if: steps.result.outputs.changed == 'true'
         uses: softprops/action-gh-release@v3
         with:
@@ -514,13 +514,13 @@ jobs:
           # 固定 Release Tag
           # --------------------------------------------------
 
-          tag_name: kernel_lts
+          tag_name: kernel_stable
 
           # --------------------------------------------------
           # 固定 Release 名称
           # --------------------------------------------------
 
-          name: Kernel LTS Stable
+          name: kernel_stable
 
           # --------------------------------------------------
           # 上传本次生成的版本文件
@@ -566,7 +566,7 @@ jobs:
           # --------------------------------------------------
 
           body: |
-            # Kernel LTS Stable
+            # kernel_stable
 
             Automatically maintained Flippy OpenWrt LTS kernels.
 
