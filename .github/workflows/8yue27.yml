@@ -1,0 +1,278 @@
+name: Kernel Stable
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 每周四 04:33 UTC
+    # 北京时间 = 每周四 12:33
+    - cron: "33 04 * * 4"
+
+
+# =========================================================
+# 防止手动运行和定时运行同时修改 latest.json
+# =========================================================
+
+concurrency:
+  group: kernel-stable
+  cancel-in-progress: false
+
+
+# =========================================================
+# GitHub Token 权限
+# =========================================================
+
+permissions:
+  contents: write
+
+
+jobs:
+
+  kernel:
+
+    name: Update Kernel Stable
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+
+    steps:
+
+      # ===================================================
+      # Checkout
+      # ===================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+
+      # ===================================================
+      # Python
+      # ===================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+          cache: "pip"
+
+
+      # ===================================================
+      # 安装 Telethon
+      # ===================================================
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install telethon
+
+
+      # ===================================================
+      # 恢复 Telegram Session
+      #
+      # Secret:
+      #
+      # TG_SESSION
+      #
+      # 必须是：
+      #
+      # base64 -w0 tg.session
+      #
+      # 得到的内容。
+      # ===================================================
+
+      - name: Restore Telegram session
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${{ secrets.TG_SESSION }}" ]; then
+            echo "::error::TG_SESSION secret is empty"
+            exit 1
+          fi
+
+          echo "${{ secrets.TG_SESSION }}" \
+            | base64 --decode \
+            > tg.session
+
+          chmod 600 tg.session
+
+          if [ ! -s tg.session ]; then
+            echo "::error::tg.session is empty"
+            exit 1
+          fi
+
+
+      # ===================================================
+      # 获取最新 Kernel
+      # ===================================================
+
+      - name: Get latest kernels
+        id: kernel
+        env:
+          API_ID: ${{ secrets.TG_API_ID }}
+          API_HASH: ${{ secrets.TG_API_HASH }}
+          CHAT_ID: ${{ secrets.TG_CHAT_IDFLIPPY }}
+
+          # 默认扫描 500 条 Telegram 消息。
+          #
+          # 如果以后频道消息特别多，
+          # 可以通过修改这里调整。
+          CHANNEL_SCAN_LIMIT: "500"
+
+        run: |
+          set -euo pipefail
+
+          python kr.py
+
+
+      # ===================================================
+      # 显示检测结果
+      # ===================================================
+
+      - name: Show kernel result
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f kernel.json ]; then
+            echo "::error::kernel.json was not generated"
+            exit 1
+          fi
+
+          echo "======================================"
+          echo "Kernel result"
+          echo "======================================"
+
+          cat kernel.json
+
+          UPDATED=$(jq -r '.updated' kernel.json)
+
+          echo "updated=${UPDATED}" \
+            >> "$GITHUB_OUTPUT"
+
+          echo "======================================"
+
+
+      # ===================================================
+      # 检查生成的压缩包
+      # ===================================================
+
+      - name: Validate generated archives
+        if: steps.result.outputs.updated == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Generated archives:"
+
+          find . \
+            -maxdepth 1 \
+            -type f \
+            -name "*.tar.gz" \
+            -printf '%f %s bytes\n' \
+            | sort
+
+          COUNT=$(find . \
+            -maxdepth 1 \
+            -type f \
+            -name "*.tar.gz" \
+            | wc -l)
+
+          echo "Archive count: ${COUNT}"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No kernel archive generated"
+            exit 1
+          fi
+
+
+      # ===================================================
+      # 检查 latest.json
+      # ===================================================
+
+      - name: Validate state
+        if: steps.result.outputs.updated == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -f latest.json ]; then
+            echo "::error::latest.json missing"
+            exit 1
+          fi
+
+          echo "Current state:"
+          cat latest.json
+
+          jq empty latest.json
+
+
+      # ===================================================
+      # 提交版本状态
+      #
+      # 只有下载和打包全部成功后才会执行。
+      # ===================================================
+
+      - name: Commit version state
+        if: steps.result.outputs.updated == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add latest.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit"
+            exit 0
+          fi
+
+          git commit \
+            -m "update kernel stable versions"
+
+          git push
+
+
+      # ===================================================
+      # 上传 GitHub Release
+      #
+      # 固定：
+      #
+      # tag:  kernel_stable
+      # name: Kernel Stable
+      #
+      # 只上传本次新生成的 tar.gz。
+      #
+      # softprops/action-gh-release v3 当前使用 Node 24。
+      # ===================================================
+
+      - name: Publish GitHub Release
+        if: steps.result.outputs.updated == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: kernel_stable
+          name: Kernel Stable
+          files: "*.tar.gz"
+          overwrite_files: true
+          fail_on_unmatched_files: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # ===================================================
+      # 清理工作目录
+      # ===================================================
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          rm -f tg.session
