@@ -15,28 +15,56 @@ from telethon import TelegramClient
 # 基础配置
 # ============================================================
 
-# 长期维护的 Kernel LTS 系列
-LTS_SERIES = (
+# ============================================================
+# 五个独立 Release
+#
+# 1. 6.1-rk35xx
+# 2. 6.1-rk3588
+# 3. 6.1 通用平台
+# 4. 6.12
+# 5. 6.18
+#
+# 注意：
+#
+# 6.1-rk35xx 与 6.1-rk3588 是完全独立的平台。
+#
+# 例如：
+#
+# 6.1.157-rk35xx
+# 6.1.157-rk3588
+#
+# 不能放在同一个 Release。
+#
+# 同时：
+#
+# 6.1.163-flippy-94+o
+#
+# 没有 rk35xx/rk3588 后缀，
+# 属于新的通用 6.1 Release。
+# ============================================================
+
+RELEASE_GROUPS = (
+    "6.1-rk35xx",
+    "6.1-rk3588",
     "6.1",
     "6.12",
     "6.18",
 )
 
-# Telegram 扫描最近多少条消息
-#
-# 不建议太小。
-# 频道如果以后增加其他消息，50 条可能不够。
-#
-# 300 条通常已经比较安全。
+
+# Telegram 扫描消息数量
 SCAN_LIMIT = int(
     os.environ.get("SCAN_LIMIT", "300")
 )
 
+
 # 状态文件
 STATE_FILE = Path("latest.json")
 
+
 # 下载目录
 DOWNLOAD_ROOT = Path("dl")
+
 
 # 最终 Release 文件目录
 RELEASE_ROOT = Path("release")
@@ -47,15 +75,19 @@ RELEASE_ROOT = Path("release")
 # ============================================================
 
 def log(message):
-    print(f"[KR] {message}", flush=True)
+    print(
+        f"[KR] {message}",
+        flush=True
+    )
 
 
 # ============================================================
-# 文件名解析
+# 文件名正则
 # ============================================================
+
 
 # ------------------------------------------------------------
-# 6.1
+# 6.1 rk35xx / rk3588
 #
 # 示例：
 #
@@ -68,24 +100,52 @@ def log(message):
 # modules-6.1.157-rk3588-flippy-2609a.tar.gz
 # boot-6.1.157-rk3588-flippy-2609a.tar.gz
 # dtb-rockchip-6.1.157-rk3588-flippy-2609a.tar.gz
-#
-# 这里：
-#
-# Kernel release =
-#   6.1.157-flippy-2609a
-#
-# Hardware =
-#   rk35xx / rk3588
-#
 # ------------------------------------------------------------
 
-RE_61 = re.compile(
+RE_61_TARGET = re.compile(
     r"^(?P<type>"
     r"header|modules|boot|dtb-rockchip"
     r")"
     r"-(?P<patch>6\.1\.\d+)"
     r"-(?P<target>rk35xx|rk3588)"
     r"-flippy-(?P<flippy>.+)"
+    r"\.tar\.gz$"
+)
+
+
+# ------------------------------------------------------------
+# 6.1 通用平台
+#
+# 示例：
+#
+# boot-6.1.163-flippy-94+o.tar.gz
+# header-6.1.163-flippy-94+o.tar.gz
+# modules-6.1.163-flippy-94+o.tar.gz
+# dtb-rockchip-6.1.163-flippy-94+o.tar.gz
+# dtb-allwinner-6.1.163-flippy-94+o.tar.gz
+# dtb-amlogic-6.1.163-flippy-94+o.tar.gz
+#
+# 注意：
+#
+# 这里没有 rk35xx / rk3588。
+#
+# 因此不能与：
+#
+# 6.1.x-rk35xx
+# 6.1.x-rk3588
+#
+# 混合。
+# ------------------------------------------------------------
+
+RE_61_GENERIC = re.compile(
+    r"^(?P<type>"
+    r"header|modules|boot|"
+    r"dtb-rockchip|dtb-allwinner|dtb-amlogic"
+    r")"
+    r"-(?P<version>"
+    r"6\.1\.\d+"
+    r"-flippy-.+"
+    r")"
     r"\.tar\.gz$"
 )
 
@@ -100,7 +160,6 @@ RE_61 = re.compile(
 #
 # header-6.18.46-flippy-95+.tar.gz
 # modules-6.18.46-flippy-95+.tar.gz
-#
 # ------------------------------------------------------------
 
 RE_STANDARD = re.compile(
@@ -122,20 +181,30 @@ RE_STANDARD = re.compile(
 
 def parse_filename(filename):
     """
-    返回：
-
-    6.1：
+    返回统一格式：
 
     {
+        "group": "6.1-rk35xx",
         "series": "6.1",
         "version": "6.1.157-flippy-2609a",
         "type": "header",
         "target": "rk35xx"
     }
 
-    6.12 / 6.18：
+    或：
 
     {
+        "group": "6.1",
+        "series": "6.1",
+        "version": "6.1.163-flippy-94+o",
+        "type": "header",
+        "target": None
+    }
+
+    或：
+
+    {
+        "group": "6.12",
         "series": "6.12",
         "version": "6.12.105-flippy-95+o",
         "type": "header",
@@ -146,41 +215,105 @@ def parse_filename(filename):
     if not filename:
         return None
 
-    filename = Path(filename).name
+    filename = Path(
+        filename
+    ).name
 
-    # --------------------------------------------------------
-    # 6.1
-    # --------------------------------------------------------
+    # ========================================================
+    # 1. 6.1 rk35xx / rk3588
+    # ========================================================
 
-    match = RE_61.fullmatch(filename)
+    match = RE_61_TARGET.fullmatch(
+        filename
+    )
 
     if match:
 
-        patch = match.group("patch")
-        target = match.group("target")
-        flippy = match.group("flippy")
-        file_type = match.group("type")
+        patch = match.group(
+            "patch"
+        )
+
+        target = match.group(
+            "target"
+        )
+
+        flippy = match.group(
+            "flippy"
+        )
+
+        file_type = match.group(
+            "type"
+        )
 
         version = (
             f"{patch}-flippy-{flippy}"
         )
 
+        if target == "rk35xx":
+
+            group = "6.1-rk35xx"
+
+        elif target == "rk3588":
+
+            group = "6.1-rk3588"
+
+        else:
+
+            return None
+
         return {
+            "group": group,
             "series": "6.1",
             "version": version,
             "type": file_type,
             "target": target,
         }
 
-    # --------------------------------------------------------
-    # 6.12 / 6.18
-    # --------------------------------------------------------
+    # ========================================================
+    # 2. 6.1 通用平台
+    #
+    # 必须放在 target 解析之后。
+    # ========================================================
 
-    match = RE_STANDARD.fullmatch(filename)
+    match = RE_61_GENERIC.fullmatch(
+        filename
+    )
 
     if match:
 
-        version = match.group("version")
+        version = match.group(
+            "version"
+        )
+
+        file_type = match.group(
+            "type"
+        )
+
+        return {
+            "group": "6.1",
+            "series": "6.1",
+            "version": version,
+            "type": file_type,
+            "target": None,
+        }
+
+    # ========================================================
+    # 3. 6.12 / 6.18
+    # ========================================================
+
+    match = RE_STANDARD.fullmatch(
+        filename
+    )
+
+    if match:
+
+        version = match.group(
+            "version"
+        )
+
+        file_type = match.group(
+            "type"
+        )
 
         series_match = re.match(
             r"^(6\.(?:12|18))\.",
@@ -190,12 +323,15 @@ def parse_filename(filename):
         if not series_match:
             return None
 
-        series = series_match.group(1)
+        series = series_match.group(
+            1
+        )
 
         return {
+            "group": series,
             "series": series,
             "version": version,
-            "type": match.group("type"),
+            "type": file_type,
             "target": None,
         }
 
@@ -213,12 +349,12 @@ def version_key(version):
     例如：
 
     6.1.157-flippy-2609a
-    6.1.158-flippy-2609a
+    6.1.163-flippy-94+o
 
     返回：
 
     (6, 1, 157)
-    (6, 1, 158)
+    (6, 1, 163)
     """
 
     match = re.match(
@@ -227,6 +363,7 @@ def version_key(version):
     )
 
     if not match:
+
         return (
             0,
             0,
@@ -245,19 +382,41 @@ def version_key(version):
 
 def get_file_key(parsed):
     """
+    每个 Release 内部独立使用 Key。
+
+    6.1-rk35xx：
+
+        header
+        modules
+        boot
+        dtb-rockchip
+
+    6.1-rk3588：
+
+        header
+        modules
+        boot
+        dtb-rockchip
+
     6.1：
 
-        rk35xx/header
-        rk35xx/modules
-        rk35xx/boot
-        rk35xx/dtb-rockchip
+        header
+        modules
+        boot
+        dtb-rockchip
+        dtb-allwinner
+        dtb-amlogic
 
-        rk3588/header
-        rk3588/modules
-        rk3588/boot
-        rk3588/dtb-rockchip
+    6.12：
 
-    6.12 / 6.18：
+        header
+        modules
+        boot
+        dtb-rockchip
+        dtb-allwinner
+        dtb-amlogic
+
+    6.18：
 
         header
         modules
@@ -267,43 +426,69 @@ def get_file_key(parsed):
         dtb-amlogic
     """
 
-    series = parsed["series"]
-    file_type = parsed["type"]
-    target = parsed["target"]
-
-    if series == "6.1":
-
-        return (
-            f"{target}/{file_type}"
-        )
-
-    return file_type
+    return parsed[
+        "type"
+    ]
 
 
 # ============================================================
-# 每个 LTS 的完整文件要求
+# 每个 Release 的完整文件要求
 # ============================================================
 
-def required_keys(series):
+def required_keys(group):
     """
-    返回一个 LTS release 必须具备的文件集合。
+    返回一个 Release 必须具备的文件集合。
     """
 
-    if series == "6.1":
+    # --------------------------------------------------------
+    # rk35xx
+    # --------------------------------------------------------
+
+    if group == "6.1-rk35xx":
 
         return {
-            "rk35xx/header",
-            "rk35xx/modules",
-            "rk35xx/boot",
-            "rk35xx/dtb-rockchip",
-
-            "rk3588/header",
-            "rk3588/modules",
-            "rk3588/boot",
-            "rk3588/dtb-rockchip",
+            "header",
+            "modules",
+            "boot",
+            "dtb-rockchip",
         }
 
-    if series in ("6.12", "6.18"):
+    # --------------------------------------------------------
+    # rk3588
+    # --------------------------------------------------------
+
+    if group == "6.1-rk3588":
+
+        return {
+            "header",
+            "modules",
+            "boot",
+            "dtb-rockchip",
+        }
+
+    # --------------------------------------------------------
+    # 通用 6.1
+    # --------------------------------------------------------
+
+    if group == "6.1":
+
+        return {
+            "header",
+            "modules",
+            "boot",
+            "dtb-rockchip",
+            "dtb-allwinner",
+            "dtb-amlogic",
+        }
+
+    # --------------------------------------------------------
+    # 6.12 / 6.18
+    # --------------------------------------------------------
+
+    if group in (
+        "6.12",
+        "6.18",
+    ):
 
         return {
             "header",
@@ -321,37 +506,92 @@ def required_keys(series):
 # 检查完整性
 # ============================================================
 
-def check_complete(series, files):
+def check_complete(
+    group,
+    files
+):
     """
     检查一个版本是否完整。
-
-    files：
-
-        {
-            file_key: {
-                "filename": ...,
-                "msg": ...
-            }
-        }
     """
 
     required = required_keys(
-        series
+        group
     )
 
     actual = set(
         files.keys()
     )
 
-    missing = required - actual
+    missing = (
+        required - actual
+    )
 
     if missing:
 
-        return False, sorted(
-            missing
+        return (
+            False,
+            sorted(missing)
         )
 
-    return True, []
+    return (
+        True,
+        []
+    )
+
+
+# ============================================================
+# Release 文件名
+# ============================================================
+
+def release_filename(group):
+    """
+    五个最终 Release 包：
+
+        kernel-6.1-rk35xx.tar.gz
+        kernel-6.1-rk3588.tar.gz
+        kernel-6.1.tar.gz
+        kernel-6.12.tar.gz
+        kernel-6.18.tar.gz
+    """
+
+    return (
+        RELEASE_ROOT
+        / f"kernel-{group}.tar.gz"
+    )
+
+
+# ============================================================
+# 下载目录名称
+# ============================================================
+
+def download_directory(
+    group,
+    version
+):
+    """
+    不同平台使用不同目录。
+
+    防止：
+
+        6.1.157-rk35xx
+        6.1.157-rk3588
+        6.1.163
+
+    互相覆盖。
+    """
+
+    safe_group = (
+        group.replace(
+            "/",
+            "_"
+        )
+    )
+
+    return (
+        DOWNLOAD_ROOT
+        / safe_group
+        / version
+    )
 
 
 # ============================================================
@@ -360,17 +600,15 @@ def check_complete(series, files):
 
 def load_state():
     """
-    读取 latest.json。
-
-    示例：
+    latest.json 示例：
 
     {
-      "6.1": "6.1.157-flippy-2609a",
+      "6.1": "6.1.163-flippy-94+o",
+      "6.1-rk35xx": "6.1.157-flippy-2609a",
+      "6.1-rk3588": "6.1.157-flippy-2609a",
       "6.12": "6.12.105-flippy-95+o",
       "6.18": "6.18.46-flippy-95+"
     }
-
-    同时兼容旧版 latest.txt。
     """
 
     # --------------------------------------------------------
@@ -386,9 +624,14 @@ def load_state():
                 encoding="utf-8"
             ) as f:
 
-                data = json.load(f)
+                data = json.load(
+                    f
+                )
 
-            if isinstance(data, dict):
+            if isinstance(
+                data,
+                dict
+            ):
 
                 return data
 
@@ -417,13 +660,11 @@ def load_state():
                 ).strip()
             )
 
-            if old_version.startswith(
-                "6.18."
-            ):
+            if old_version:
 
                 log(
-                    "Migrating old latest.txt "
-                    "to latest.json"
+                    "Migrating old "
+                    "latest.txt to latest.json"
                 )
 
                 return {
@@ -434,7 +675,7 @@ def load_state():
 
             log(
                 f"WARNING: failed to migrate "
-                f"latest.txt: {exc}"
+                f"{old_file}: {exc}"
             )
 
     return {}
@@ -482,22 +723,56 @@ async def scan_channel(
     """
     扫描 Telegram 最近消息。
 
-    重点：
+    重点逻辑：
 
-    不是：
+    Telegram：
 
-        找到第一个 6.1 就停止
+        6.1.163
+        6.1.157-rk35xx
+        6.1.157-rk3588
+        6.12.x
+        6.18.x
 
-    而是：
+    会被分成五个完全独立的 Release Group。
 
-        先把所有候选版本分组
-        ↓
-        检查每个版本是否完整
-        ↓
-        从完整版本中选择最新版本
+    --------------------------------------------------------
 
-    因此 Telegram 正在分批发布文件时，
-    不会误把半套文件当成正式版本。
+    Group：
+
+        6.1-rk35xx
+
+    只接受：
+
+        *-6.1.xxx-rk35xx-*
+
+    --------------------------------------------------------
+
+    Group：
+
+        6.1-rk3588
+
+    只接受：
+
+        *-6.1.xxx-rk3588-*
+
+    --------------------------------------------------------
+
+    Group：
+
+        6.1
+
+    只接受：
+
+        *-6.1.xxx-flippy-*
+
+    且不能有：
+
+        -rk35xx-
+        -rk3588-
+
+    --------------------------------------------------------
+
+    因此三个 6.1 平台完全不会混淆。
     """
 
     log(
@@ -506,8 +781,8 @@ async def scan_channel(
     )
 
     releases = {
-        series: {}
-        for series in LTS_SERIES
+        group: {}
+        for group in RELEASE_GROUPS
     }
 
     async for msg in client.iter_messages(
@@ -529,15 +804,15 @@ async def scan_channel(
         if not parsed:
             continue
 
-        series = parsed[
-            "series"
+        group = parsed[
+            "group"
         ]
 
         version = parsed[
             "version"
         ]
 
-        if series not in LTS_SERIES:
+        if group not in RELEASE_GROUPS:
             continue
 
         key = get_file_key(
@@ -549,25 +824,26 @@ async def scan_channel(
         # ----------------------------------------------------
 
         if version not in releases[
-            series
+            group
         ]:
 
             releases[
-                series
+                group
             ][version] = {
                 "files": {},
                 "latest_msg_id": msg.id,
             }
 
         release = releases[
-            series
+            group
         ][version]
 
         # ----------------------------------------------------
         # 同一个文件 Key 只保存最新消息
         #
         # iter_messages 默认从新到旧。
-        # 因此第一次遇到的就是最新文件。
+        #
+        # 第一次遇到的同名文件就是最新消息。
         # ----------------------------------------------------
 
         if key not in release[
@@ -582,7 +858,7 @@ async def scan_channel(
             }
 
         # ----------------------------------------------------
-        # 保存这个版本最新出现的消息 ID
+        # 保存该版本最新消息 ID
         # ----------------------------------------------------
 
         if msg.id > release[
@@ -594,17 +870,20 @@ async def scan_channel(
             ] = msg.id
 
     # ========================================================
-    # 每个 LTS 选择最新完整版本
+    # 五个 Release 分别选择最新完整版本
     # ========================================================
 
     result = {}
 
-    for series in LTS_SERIES:
+    for group in RELEASE_GROUPS:
 
         candidates = []
 
-        for version, release in releases[
-            series
+        for (
+            version,
+            release
+        ) in releases[
+            group
         ].items():
 
             files = release[
@@ -613,7 +892,7 @@ async def scan_channel(
 
             complete, missing = (
                 check_complete(
-                    series,
+                    group,
                     files
                 )
             )
@@ -621,16 +900,17 @@ async def scan_channel(
             if not complete:
 
                 log(
-                    f"[{series}] "
+                    f"[{group}] "
                     f"Ignore incomplete "
                     f"{version}: "
                     f"{len(files)}/"
-                    f"{len(required_keys(series))}"
+                    f"{len(required_keys(group))}"
                 )
 
                 if missing:
+
                     log(
-                        f"[{series}] "
+                        f"[{group}] "
                         f"Missing: "
                         f"{', '.join(missing)}"
                     )
@@ -657,14 +937,34 @@ async def scan_channel(
         if not candidates:
 
             log(
-                f"[{series}] "
+                f"[{group}] "
                 f"No complete release found"
             )
 
             continue
 
         # ----------------------------------------------------
-        # 版本号最大者为最新
+        # Linux 版本号最大者优先
+        #
+        # 例如：
+        #
+        # 6.1.163
+        #
+        # 大于：
+        #
+        # 6.1.157
+        #
+        # 但是这里只在同一个 group 内比较。
+        #
+        # 因此不会出现：
+        #
+        # 6.1.163
+        #
+        # 把：
+        #
+        # 6.1.157-rk35xx
+        #
+        # 顶掉的问题。
         # ----------------------------------------------------
 
         candidates.sort(
@@ -682,13 +982,13 @@ async def scan_channel(
             files,
         ) = candidates[0]
 
-        result[series] = {
+        result[group] = {
             "version": version,
             "files": files,
         }
 
         log(
-            f"[{series}] "
+            f"[{group}] "
             f"Latest complete: "
             f"{version} "
             f"({len(files)} files)"
@@ -702,11 +1002,13 @@ async def scan_channel(
 # ============================================================
 
 def clean_download_directory(
+    group,
     version
 ):
 
-    directory = (
-        DOWNLOAD_ROOT / version
+    directory = download_directory(
+        group,
+        version
     )
 
     if directory.exists():
@@ -722,20 +1024,28 @@ def clean_download_directory(
 
 
 # ============================================================
-# 下载一个完整版本
+# 下载完整版本
 # ============================================================
 
 async def download_release(
-    series,
+    group,
     version,
     files
 ):
     """
-    下载一个完整 release。
+    下载一个完整 Release。
+
+    6.1-rk35xx：
+
+        4 文件
+
+    6.1-rk3588：
+
+        4 文件
 
     6.1：
 
-        8 文件
+        6 文件
 
     6.12：
 
@@ -747,11 +1057,13 @@ async def download_release(
     """
 
     clean_download_directory(
+        group,
         version
     )
 
-    version_dir = (
-        DOWNLOAD_ROOT / version
+    version_dir = download_directory(
+        group,
+        version
     )
 
     version_dir.mkdir(
@@ -765,7 +1077,9 @@ async def download_release(
 
         for key in sorted(files):
 
-            item = files[key]
+            item = files[
+                key
+            ]
 
             filename = item[
                 "filename"
@@ -775,32 +1089,9 @@ async def download_release(
                 "msg"
             ]
 
-            # ------------------------------------------------
-            # 6.1 按硬件目标分目录
-            # ------------------------------------------------
-
-            parsed = parse_filename(
-                filename
+            output_dir = (
+                version_dir
             )
-
-            if (
-                series == "6.1"
-                and parsed
-            ):
-
-                target = parsed[
-                    "target"
-                ]
-
-                output_dir = (
-                    version_dir / target
-                )
-
-            else:
-
-                output_dir = (
-                    version_dir
-                )
 
             output_dir.mkdir(
                 parents=True,
@@ -808,7 +1099,8 @@ async def download_release(
             )
 
             output_file = (
-                output_dir / filename
+                output_dir
+                / filename
             )
 
             temp_file = Path(
@@ -816,7 +1108,7 @@ async def download_release(
             )
 
             log(
-                f"[{series}] "
+                f"[{group}] "
                 f"Downloading: "
                 f"{filename}"
             )
@@ -824,7 +1116,9 @@ async def download_release(
             try:
 
                 await msg.download_media(
-                    file=str(temp_file)
+                    file=str(
+                        temp_file
+                    )
                 )
 
                 # --------------------------------------------
@@ -838,7 +1132,10 @@ async def download_release(
                         f"{filename}"
                     )
 
-                if temp_file.stat().st_size == 0:
+                if (
+                    temp_file.stat().st_size
+                    == 0
+                ):
 
                     raise RuntimeError(
                         f"Downloaded file is empty: "
@@ -859,7 +1156,7 @@ async def download_release(
                 )
 
                 log(
-                    f"[{series}] "
+                    f"[{group}] "
                     f"Downloaded: "
                     f"{filename}"
                 )
@@ -867,6 +1164,7 @@ async def download_release(
             except Exception:
 
                 if temp_file.exists():
+
                     temp_file.unlink()
 
                 raise
@@ -875,20 +1173,68 @@ async def download_release(
         # 最终数量检查
         # ----------------------------------------------------
 
-        if len(downloaded) != len(files):
+        if (
+            len(downloaded)
+            != len(files)
+        ):
 
             raise RuntimeError(
-                f"[{series}] "
+                f"[{group}] "
                 f"Downloaded "
                 f"{len(downloaded)}/"
                 f"{len(files)} files"
             )
+
+        # ----------------------------------------------------
+        # 再次检查磁盘上的文件
+        # ----------------------------------------------------
+
+        for key in files:
+
+            filename = files[
+                key
+            ][
+                "filename"
+            ]
+
+            path = (
+                version_dir
+                / filename
+            )
+
+            if not path.exists():
+
+                raise RuntimeError(
+                    f"[{group}] "
+                    f"Missing downloaded file: "
+                    f"{path}"
+                )
+
+            if not path.is_file():
+
+                raise RuntimeError(
+                    f"[{group}] "
+                    f"Not a regular file: "
+                    f"{path}"
+                )
+
+            if (
+                path.stat().st_size
+                == 0
+            ):
+
+                raise RuntimeError(
+                    f"[{group}] "
+                    f"Empty downloaded file: "
+                    f"{path}"
+                )
 
         return version_dir
 
     except Exception:
 
         if version_dir.exists():
+
             shutil.rmtree(
                 version_dir
             )
@@ -901,42 +1247,63 @@ async def download_release(
 # ============================================================
 
 def package_release(
-    series,
+    group,
     version,
     version_dir,
     files
 ):
     """
-    打包：
+    创建最终 Release。
 
-    release/kernel-6.1.tar.gz
-    release/kernel-6.12.tar.gz
-    release/kernel-6.18.tar.gz
+    五个包：
 
-    6.1 内部：
+        kernel-6.1-rk35xx.tar.gz
+        kernel-6.1-rk3588.tar.gz
+        kernel-6.1.tar.gz
+        kernel-6.12.tar.gz
+        kernel-6.18.tar.gz
+
+
+    --------------------------------------------------------
+
+    6.1-rk35xx：
 
         6.1.157-flippy-2609a/
-        ├── rk35xx/
-        │   ├── header...
-        │   ├── modules...
-        │   ├── boot...
-        │   └── dtb-rockchip...
-        │
-        └── rk3588/
-            ├── header...
-            ├── modules...
-            ├── boot...
-            └── dtb-rockchip...
+        ├── boot-...
+        ├── dtb-rockchip-...
+        ├── header-...
+        └── modules-...
 
-    6.12 / 6.18 内部：
 
-        6.12.105-flippy-95+o/
-        ├── boot-6.12.105-flippy-95+o.tar.gz
-        ├── dtb-allwinner-6.12.105-flippy-95+o.tar.gz
-        ├── dtb-amlogic-6.12.105-flippy-95+o.tar.gz
-        ├── dtb-rockchip-6.12.105-flippy-95+o.tar.gz
-        ├── header-6.12.105-flippy-95+o.tar.gz
-        └── modules-6.12.105-flippy-95+o.tar.gz
+    --------------------------------------------------------
+
+    6.1-rk3588：
+
+        6.1.157-flippy-2609a/
+        ├── boot-...
+        ├── dtb-rockchip-...
+        ├── header-...
+        └── modules-...
+
+
+    --------------------------------------------------------
+
+    6.1 通用：
+
+        6.1.163-flippy-94+o/
+        ├── boot-...
+        ├── dtb-allwinner-...
+        ├── dtb-amlogic-...
+        ├── dtb-rockchip-...
+        ├── header-...
+        └── modules-...
+
+
+    --------------------------------------------------------
+
+    6.12 / 6.18：
+
+        同样为对应版本目录。
     """
 
     RELEASE_ROOT.mkdir(
@@ -944,20 +1311,26 @@ def package_release(
         exist_ok=True
     )
 
-    output_file = (
-        RELEASE_ROOT
-        / f"kernel-{series}.tar.gz"
+    output_file = release_filename(
+        group
     )
 
     # --------------------------------------------------------
-    # 如果已有旧包，先删除
+    # 删除旧 Release
     # --------------------------------------------------------
 
     if output_file.exists():
+
+        log(
+            f"[{group}] "
+            f"Removing old archive: "
+            f"{output_file}"
+        )
+
         output_file.unlink()
 
     log(
-        f"[{series}] "
+        f"[{group}] "
         f"Packing {output_file}"
     )
 
@@ -967,139 +1340,93 @@ def package_release(
     ) as tar:
 
         # ----------------------------------------------------
-        # 6.1
+        # 所有五种 Release 都使用：
         #
-        # 明确保留 rk35xx / rk3588
+        # version/
+        #     filename
+        #
+        # 不再把 rk35xx/rk3588 混在一起。
         # ----------------------------------------------------
 
-        if series == "6.1":
+        for key in sorted(files):
 
-            for target in (
-                "rk35xx",
-                "rk3588",
-            ):
+            item = files[
+                key
+            ]
 
-                target_dir = (
-                    version_dir / target
-                )
+            filename = item[
+                "filename"
+            ]
 
-                if not target_dir.exists():
+            source_file = (
+                version_dir
+                / filename
+            )
 
-                    raise RuntimeError(
-                        f"[{series}] "
-                        f"Missing target directory: "
-                        f"{target_dir}"
-                    )
+            log(
+                f"[{group}] "
+                f"Adding file: "
+                f"{source_file}"
+            )
 
-                log(
-                    f"[{series}] "
-                    f"Adding directory: "
-                    f"{target_dir}"
-                )
+            # ------------------------------------------------
+            # 文件必须存在
+            # ------------------------------------------------
 
-                # 包内结构：
-                #
-                # 6.1.157-flippy-2609a/rk35xx/
-                # 6.1.157-flippy-2609a/rk3588/
+            if not source_file.exists():
 
-                tar.add(
-                    target_dir,
-                    arcname=(
-                        f"{version}/{target}"
-                    )
-                )
-
-        # ----------------------------------------------------
-        # 6.12 / 6.18
-        #
-        # 注意：
-        #
-        # files 的 key 是：
-        #
-        #   boot
-        #   header
-        #   modules
-        #   ...
-        #
-        # 但真正的磁盘文件名是：
-        #
-        #   boot-6.12.105-flippy-95+o.tar.gz
-        #   header-6.12.105-flippy-95+o.tar.gz
-        #   ...
-        #
-        # 因此不能：
-        #
-        #   version_dir / key
-        #
-        # 必须使用：
-        #
-        #   files[key]["filename"]
-        # ----------------------------------------------------
-
-        else:
-
-            for key in sorted(files):
-
-                item = files[key]
-
-                filename = item[
-                    "filename"
-                ]
-
-                source_file = (
-                    version_dir / filename
-                )
-
-                log(
-                    f"[{series}] "
-                    f"Adding file: "
+                raise RuntimeError(
+                    f"[{group}] "
+                    f"Missing file: "
                     f"{source_file}"
                 )
 
-                if not source_file.exists():
+            if not source_file.is_file():
 
-                    raise RuntimeError(
-                        f"[{series}] "
-                        f"Missing file: "
-                        f"{source_file}"
-                    )
-
-                if not source_file.is_file():
-
-                    raise RuntimeError(
-                        f"[{series}] "
-                        f"Expected regular file, "
-                        f"but found: "
-                        f"{source_file}"
-                    )
-
-                file_size = (
-                    source_file.stat().st_size
+                raise RuntimeError(
+                    f"[{group}] "
+                    f"Expected regular file, "
+                    f"but found: "
+                    f"{source_file}"
                 )
 
-                if file_size == 0:
+            # ------------------------------------------------
+            # 文件不能是空文件
+            # ------------------------------------------------
 
-                    raise RuntimeError(
-                        f"[{series}] "
-                        f"File is empty: "
-                        f"{source_file}"
-                    )
+            file_size = (
+                source_file.stat().st_size
+            )
 
-                tar.add(
-                    source_file,
-                    arcname=(
-                        f"{version}/{filename}"
-                    )
+            if file_size == 0:
+
+                raise RuntimeError(
+                    f"[{group}] "
+                    f"File is empty: "
+                    f"{source_file}"
                 )
 
-    # --------------------------------------------------------
+            # ------------------------------------------------
+            # 添加到：
+            #
+            # version/filename
+            # ------------------------------------------------
+
+            tar.add(
+                source_file,
+                arcname=(
+                    f"{version}/{filename}"
+                )
+            )
+
+    # ========================================================
     # 最终检查
-    # --------------------------------------------------------
+    # ========================================================
 
     if not output_file.exists():
 
         raise RuntimeError(
-            f"[{series}] "
+            f"[{group}] "
             f"Archive was not created"
         )
 
@@ -1108,12 +1435,12 @@ def package_release(
     if size == 0:
 
         raise RuntimeError(
-            f"[{series}] "
+            f"[{group}] "
             f"Archive is empty"
         )
 
     log(
-        f"[{series}] "
+        f"[{group}] "
         f"Created {output_file} "
         f"({size} bytes)"
     )
@@ -1122,14 +1449,60 @@ def package_release(
 
 
 # ============================================================
+# GitHub Actions 输出
+# ============================================================
+
+def write_result(
+    changed,
+    versions,
+    current_versions
+):
+
+    result = {
+        "changed": changed,
+        "versions": versions,
+        "current_versions": current_versions,
+        "release_groups": list(
+            RELEASE_GROUPS
+        ),
+        "release_files": {
+            group: str(
+                release_filename(group)
+            )
+            for group in RELEASE_GROUPS
+        },
+    }
+
+    with open(
+        "kernel-result.json",
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            result,
+            f,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True
+        )
+
+        f.write("\n")
+
+    log(
+        "kernel-result.json written"
+    )
+
+
+# ============================================================
 # 主程序
 # ============================================================
 
 async def main():
 
-    # --------------------------------------------------------
+    # ========================================================
     # Environment
-    # --------------------------------------------------------
+    # ========================================================
 
     try:
 
@@ -1152,9 +1525,9 @@ async def main():
             f"{exc}"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Load state
-    # --------------------------------------------------------
+    # ========================================================
 
     state = load_state()
 
@@ -1162,9 +1535,9 @@ async def main():
         f"Local state: {state}"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # Telegram
-    # --------------------------------------------------------
+    # ========================================================
 
     client = TelegramClient(
         "tg",
@@ -1190,8 +1563,10 @@ async def main():
         )
 
         current_versions = {
-            series: release["version"]
-            for series, release
+            group: release[
+                "version"
+            ]
+            for group, release
             in releases.items()
         }
 
@@ -1201,23 +1576,29 @@ async def main():
         )
 
         # ====================================================
-        # 2. Process each LTS independently
+        # 2. Process five Release groups
         # ====================================================
 
-        new_state = dict(state)
+        new_state = dict(
+            state
+        )
 
         changed = []
 
-        for series in LTS_SERIES:
+        for group in RELEASE_GROUPS:
 
             release = releases.get(
-                series
+                group
             )
+
+            # ------------------------------------------------
+            # 没有完整版本
+            # ------------------------------------------------
 
             if not release:
 
                 log(
-                    f"[{series}] "
+                    f"[{group}] "
                     f"No complete release found, skip"
                 )
 
@@ -1228,33 +1609,32 @@ async def main():
             ]
 
             previous_version = state.get(
-                series
+                group
             )
 
             log(
-                f"[{series}] "
+                f"[{group}] "
                 f"previous={previous_version}, "
                 f"latest={target_version}"
             )
 
-            # ------------------------------------------------
+            archive = release_filename(
+                group
+            )
+
+            # =================================================
             # 已经是最新
-            # ------------------------------------------------
+            # =================================================
 
             if (
                 previous_version
                 == target_version
             ):
 
-                archive = (
-                    RELEASE_ROOT
-                    / f"kernel-{series}.tar.gz"
-                )
-
                 if archive.exists():
 
                     log(
-                        f"[{series}] "
+                        f"[{group}] "
                         f"{target_version} "
                         f"already current"
                     )
@@ -1262,14 +1642,14 @@ async def main():
                     continue
 
                 log(
-                    f"[{series}] "
+                    f"[{group}] "
                     f"State is current but archive "
                     f"is missing, rebuild"
                 )
 
-            # ------------------------------------------------
-            # 收集文件
-            # ------------------------------------------------
+            # =================================================
+            # 再次检查完整性
+            # =================================================
 
             files = release[
                 "files"
@@ -1277,7 +1657,7 @@ async def main():
 
             complete, missing = (
                 check_complete(
-                    series,
+                    group,
                     files
                 )
             )
@@ -1285,61 +1665,61 @@ async def main():
             if not complete:
 
                 raise RuntimeError(
-                    f"[{series}] "
+                    f"[{group}] "
                     f"Release is incomplete. "
                     f"Missing: "
                     f"{', '.join(missing)}"
                 )
 
             log(
-                f"[{series}] "
+                f"[{group}] "
                 f"Complete release verified: "
                 f"{len(files)} files"
             )
 
-            # ------------------------------------------------
+            # =================================================
             # 下载
-            # ------------------------------------------------
+            # =================================================
 
             version_dir = (
                 await download_release(
-                    series,
+                    group,
                     target_version,
                     files
                 )
             )
 
-            # ------------------------------------------------
+            # =================================================
             # 打包
-            # ------------------------------------------------
+            # =================================================
 
             package_release(
-                series,
+                group,
                 target_version,
                 version_dir,
                 files
             )
 
-            # ------------------------------------------------
-            # 只有下载 + 打包都成功，
+            # =================================================
+            # 只有下载和打包都成功，
             # 才更新状态。
-            # ------------------------------------------------
+            # =================================================
 
             new_state[
-                series
+                group
             ] = target_version
 
             changed.append(
-                series
+                group
             )
 
             log(
-                f"[{series}] "
+                f"[{group}] "
                 f"Update completed"
             )
 
         # ====================================================
-        # 3. Save state
+        # 3. 保存状态
         # ====================================================
 
         if changed:
@@ -1360,33 +1740,60 @@ async def main():
             )
 
         # ====================================================
-        # 4. GitHub Actions result
+        # 4. 写 GitHub Actions 结果
         # ====================================================
 
-        result = {
-            "changed": changed,
-            "versions": new_state,
-            "current_versions": current_versions,
-        }
+        write_result(
+            changed,
+            new_state,
+            current_versions
+        )
 
-        with open(
-            "kernel-result.json",
-            "w",
-            encoding="utf-8"
-        ) as f:
-
-            json.dump(
-                result,
-                f,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True
-            )
-
-            f.write("\n")
+        # ====================================================
+        # 5. 显示五个 Release
+        # ====================================================
 
         log(
-            "kernel-result.json written"
+            "================================================"
+        )
+
+        log(
+            "Five Release packages:"
+        )
+
+        for group in RELEASE_GROUPS:
+
+            archive = release_filename(
+                group
+            )
+
+            if archive.exists():
+
+                size = (
+                    archive.stat().st_size
+                )
+
+                version = new_state.get(
+                    group,
+                    "N/A"
+                )
+
+                log(
+                    f"{group}: "
+                    f"{version} -> "
+                    f"{archive} "
+                    f"({size} bytes)"
+                )
+
+            else:
+
+                log(
+                    f"{group}: "
+                    f"NOT GENERATED"
+                )
+
+        log(
+            "================================================"
         )
 
     finally:
@@ -1403,4 +1810,7 @@ async def main():
 # ============================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    asyncio.run(
+        main()
+    )
