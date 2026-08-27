@@ -21,7 +21,7 @@ def extract_ver(name):
     return m.group(1) if m else None
 
 async def detect_latest_version(client, chat_id):
-    """极速检测：只看最近10条"""
+    """极速检测：只看最近20条"""
     log("Fast check latest version (last 20 msgs)")
     latest = None
 
@@ -42,7 +42,7 @@ async def detect_latest_version(client, chat_id):
     return latest
 
 async def collect_files(client, chat_id, target_ver):
-    """完整扫描：收集4件套"""
+    """完整扫描：收集6件套"""
     log(f"Full scan for version {target_ver}")
 
     targets = {
