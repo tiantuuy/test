@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: write
+concurrency:
+  group: kernel-lts
+  cancel-in-progress: false
 
 jobs:
 
