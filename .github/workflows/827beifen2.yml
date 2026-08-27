@@ -138,7 +138,9 @@ jobs:
 
       - name: Commit kernel state
         if: steps.check.outputs.changed == 'true'
+        shell: bash
         run: |
+          set -e
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -152,7 +154,9 @@ jobs:
 
           git commit -m "update LTS kernel versions"
 
-          git push
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
 
 
       # ======================================================
